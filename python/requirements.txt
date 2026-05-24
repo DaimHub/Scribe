@@ -1,8 +1,10 @@
 # Pinned to versions that compose cleanly as of 2026-05.
-torch>=2.5,<2.10
-torchaudio>=2.5,<2.10
+# torch/torchaudio capped at <2.9 because torchaudio 2.9 dropped
+# `AudioMetaData`, which pyannote.audio 3.x still references at module load.
+torch>=2.5,<2.9
+torchaudio>=2.5,<2.9
 faster-whisper>=1.0
-pyannote.audio>=3.1
+pyannote.audio>=3.1,<4
 transformers>=4.40
 ctranslate2>=4.4
 # whisperx pulls the rest in; pin its minimum so we get current API

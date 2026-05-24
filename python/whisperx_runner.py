@@ -69,17 +69,34 @@ def align_model_for(lang: str) -> str:
     return _ALIGN_MODEL_BY_LANG.get(lang, f"wav2vec2 ({lang})")
 
 
-def selftest() -> None:
+def _module_version(mod: str) -> str:
     import importlib
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
-    versions: dict[str, str] = {}
-    for mod in ("torch", "whisperx", "faster_whisper", "pyannote.audio"):
+    try:
+        m = importlib.import_module(mod)
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: {e}"
+    v = getattr(m, "__version__", None)
+    if v:
+        return v
+    for name in (mod, mod.replace(".", "-"), mod.replace(".", "_")):
         try:
-            m = importlib.import_module(mod)
-            versions[mod] = getattr(m, "__version__", "?")
-        except Exception as e:  # noqa: BLE001
-            versions[mod] = f"ERROR: {e}"
-    print(json.dumps({"ok": True, "versions": versions}))
+            return _pkg_version(name)
+        except PackageNotFoundError:
+            continue
+    return "?"
+
+
+def _collect_versions() -> dict[str, str]:
+    return {
+        mod: _module_version(mod)
+        for mod in ("torch", "whisperx", "faster_whisper", "pyannote.audio")
+    }
+
+
+def selftest() -> None:
+    print(json.dumps({"ok": True, "versions": _collect_versions()}))
 
 
 # Module-level caches so repeat calls inside `--serve` skip the model loads
@@ -563,17 +580,8 @@ def serve() -> None:
 
         if cmd_type == "selftest":
             try:
-                import importlib
-
-                versions: dict[str, str] = {}
-                for mod in ("torch", "whisperx", "faster_whisper", "pyannote.audio"):
-                    try:
-                        m = importlib.import_module(mod)
-                        versions[mod] = getattr(m, "__version__", "?")
-                    except Exception as ex:  # noqa: BLE001
-                        versions[mod] = f"ERROR: {ex}"
                 sys.stdout.write(
-                    json.dumps({"event": "result", "id": req_id, "ok": True, "result": {"versions": versions}})
+                    json.dumps({"event": "result", "id": req_id, "ok": True, "result": {"versions": _collect_versions()}})
                     + "\n"
                 )
             except Exception as e:  # noqa: BLE001
