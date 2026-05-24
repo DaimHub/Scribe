@@ -38,10 +38,11 @@ extraResources:
 
 mac:
   category: public.app-category.productivity
+  identity: null
   target:
     - target: dmg
       arch: arm64
-  hardenedRuntime: true
+  hardenedRuntime: false
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist

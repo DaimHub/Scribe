@@ -32,8 +32,30 @@ function locatePythonScript(name: string): string {
   return prod && existsSync(prod) ? prod : dev;
 }
 
-export const VENV_DIR = (): string =>
-  path.join(app.getPath("userData"), "python-venv");
+// Venv resolution order:
+//   1. Bundled inside the packaged app (Resources/python-venv) — production.
+//   2. Project root python-venv — dev, populated by scripts/bootstrap-python.sh.
+//   3. userData/python-venv — legacy in-app installer fallback.
+// Cached after first resolution so we don't hit the filesystem on every IPC.
+let cachedVenvDir: string | null = null;
+function resolveVenvDir(): string {
+  if (cachedVenvDir) return cachedVenvDir;
+  const candidates: string[] = [];
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, "python-venv"));
+  }
+  candidates.push(path.resolve(here, "..", "..", "python-venv"));
+  for (const dir of candidates) {
+    if (existsSync(path.join(dir, "bin", "python3"))) {
+      cachedVenvDir = dir;
+      return dir;
+    }
+  }
+  cachedVenvDir = path.join(app.getPath("userData"), "python-venv");
+  return cachedVenvDir;
+}
+
+export const VENV_DIR = (): string => resolveVenvDir();
 
 const VENV_BIN = (): string => path.join(VENV_DIR(), "bin");
 const VENV_PYTHON = (): string => path.join(VENV_BIN(), "python3");

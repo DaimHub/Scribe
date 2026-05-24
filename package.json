@@ -13,7 +13,7 @@
     "build": "npm run build:next && npm run build:electron",
     "start": "electron dist-electron/main.js",
     "bootstrap:python": "./scripts/bootstrap-python.sh",
-    "dist": "npm run build && electron-builder --mac --arm64",
+    "dist": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64",
     "release": "npm run bootstrap:python && npm run dist && ./scripts/install-to-applications.sh",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
