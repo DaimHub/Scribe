@@ -1,21 +1,39 @@
-# Next.js template
+# Scribe
 
-This is a Next.js template with shadcn/ui.
+Local-first meeting recorder, transcriber, and summarizer for macOS. Electron + Next.js shell, WhisperX (Python) for transcription, node-llama-cpp for summaries.
 
-## Adding components
-
-To add components to your app, run the following command:
+## Develop
 
 ```bash
-npx shadcn@latest add button
+npm install
+npm run dev
 ```
 
-This will place the ui components in the `components` directory.
+## Release (build + install to /Applications)
 
-## Using components
+One command. Builds the Python sidecar venv if it's missing, packages the app into a DMG, then installs it to `/Applications`:
 
-To use the components in your app, import them as follows:
-
-```tsx
-import { Button } from "@/components/ui/button";
+```bash
+npm run release
 ```
+
+When it finishes, Scribe is in your Applications folder, ready to launch.
+
+### Requirements
+
+- macOS on Apple Silicon
+- Node 20+
+- Python 3.11 or 3.12 available on PATH (e.g. via `pyenv install 3.12.11`)
+
+### What the release script does
+
+1. `scripts/bootstrap-python.sh` — creates `python-venv/` and installs `python/requirements.txt` (idempotent).
+2. `npm run build` — Next.js static export + TypeScript compile of `electron/`.
+3. `electron-builder --mac --arm64` — produces `release/Scribe-<version>-arm64.dmg`.
+4. `scripts/install-to-applications.sh` — quits any running Scribe, mounts the DMG, copies `Scribe.app` to `/Applications`, strips the quarantine attribute.
+
+The DMG is unsigned and unnotarized. It runs fine on the machine that built it. To distribute it to other Macs you'd need an Apple Developer ID and to flip `notarize: true` in `electron-builder.yml`.
+
+### Bumping the version
+
+Edit `version` in `package.json` before each release so DMGs don't overwrite each other in `release/`.

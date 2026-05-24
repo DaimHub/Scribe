@@ -1,0 +1,9 @@
+# Pinned to versions that compose cleanly as of 2026-05.
+torch>=2.5,<2.10
+torchaudio>=2.5,<2.10
+faster-whisper>=1.0
+pyannote.audio>=3.1
+transformers>=4.40
+ctranslate2>=4.4
+# whisperx pulls the rest in; pin its minimum so we get current API
+whisperx>=3.3

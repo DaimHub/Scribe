@@ -1,0 +1,57 @@
+appId: com.scribe.app
+productName: Scribe
+copyright: Copyright © 2026 Scribe
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - dist-electron/**
+  - out/**
+  - package.json
+  - "!**/.DS_Store"
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/*.{map,ts,tsx,cts,mts}"
+
+asarUnpack:
+  - "**/*.node"
+  - resources/**
+  - python-venv/**
+
+extraResources:
+  - from: resources
+    to: resources
+    filter: ["**/*"]
+  - from: python-venv
+    to: python-venv
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/tests/**"
+      - "!**/test/**"
+  - from: python
+    to: python
+    filter: ["**/*.py"]
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Scribe needs your microphone to capture what you say in meetings.
+    NSAudioCaptureUsageDescription: Scribe needs to capture audio playing on your Mac to transcribe meeting participants.
+    NSCameraUsageDescription: Not used. Present for system framework compatibility.
+    LSMinimumSystemVersion: "14.4.0"
+  notarize: false
+
+dmg:
+  artifactName: Scribe-${version}-${arch}.dmg
+  sign: false

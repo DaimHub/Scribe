@@ -15,8 +15,14 @@
 /.next/
 /out/
 
-# production
-/build
+# electron
+/dist-electron/
+/release/
+
+# data
+/data/
+/models/
+/python-venv/
 
 # misc
 .DS_Store

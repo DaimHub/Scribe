@@ -59,7 +59,8 @@
     --secondary: oklch(0.967 0.001 286.375);
     --secondary-foreground: oklch(0.21 0.006 285.885);
     --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
+    /* Was 0.556 — barely WCAG AA (~4.2:1). 0.45 lands ~5.7:1 for small text. */
+    --muted-foreground: oklch(0.45 0 0);
     --accent: oklch(0.97 0 0);
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
@@ -130,3 +131,17 @@
     @apply font-sans;
     }
 }
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(800%); }
+}
+
+/* While the user is dragging the sidebar resizer, suppress the 200ms width
+   eased transition on the shadcn sidebar parts so the panel tracks the
+   cursor 1:1 instead of lerping behind it. */
+body[data-sidebar-resizing] [data-slot="sidebar-gap"],
+body[data-sidebar-resizing] [data-slot="sidebar-container"] {
+  transition: none !important;
+}
+
