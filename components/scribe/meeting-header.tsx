@@ -8,6 +8,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Button } from "@/components/ui/button";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowRight01Icon,
@@ -19,6 +20,8 @@ import { useScribe, formatDuration } from "@/lib/store";
 import { SpeakersChip } from "./speakers-chip";
 import { TagChips } from "./tag-chips";
 import { LinkedEventRow } from "./linked-event-row";
+import { REVIEW_BADGE, REVIEW_BADGE_HOVER } from "@/lib/status-color";
+import { cn } from "@/lib/utils";
 
 function parsePipeline(json: string | null): Pipeline | null {
   if (!json) return null;
@@ -179,10 +182,17 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
         />
         <DropdownMenu>
           <DropdownMenuTrigger
-            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          >
-            <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" />
-          </DropdownMenuTrigger>
+            render={(props) => (
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Meeting actions"
+              >
+                <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" />
+              </Button>
+            )}
+          />
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onClick={() => void processMeeting(detail.meeting.id)}
@@ -270,14 +280,18 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
                   onClick={() =>
                     setVoiceTaggingPanelOpen(!voiceTaggingPanelOpen)
                   }
-                  className="inline-flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors",
+                    REVIEW_BADGE,
+                    REVIEW_BADGE_HOVER,
+                  )}
                   aria-expanded={voiceTaggingPanelOpen}
                 >
                   <HugeiconsIcon icon={UserCheck01Icon} className="size-3.5" />
                   <span>
                     {reviewCount} {reviewCount === 1 ? "speaker needs" : "speakers need"} your input
                   </span>
-                  <span className="text-amber-700/70 dark:text-amber-400/70">
+                  <span className="opacity-70">
                     · {voiceTaggingPanelOpen ? "Hide" : "Review"}
                   </span>
                 </button>
@@ -295,13 +309,13 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
                 <>
                   <dt className="self-center text-muted-foreground">Pipeline</dt>
                   <dd>
-                    <button
-                      type="button"
+                    <Button
+                      variant="link"
                       onClick={() => setShowPipeline(true)}
-                      className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                      className="h-auto p-0 text-xs text-muted-foreground hover:text-foreground"
                     >
                       Show
-                    </button>
+                    </Button>
                   </dd>
                 </>
               );
@@ -311,14 +325,14 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
                 <dt className="self-center text-muted-foreground">Pipeline</dt>
                 <dd className="flex items-center gap-2">
                   <PipelineBadges pipeline={pipeline} />
-                  <button
-                    type="button"
+                  <Button
+                    variant="link"
                     onClick={() => setShowPipeline(false)}
-                    className="text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+                    className="h-auto p-0 text-[10px] text-muted-foreground hover:text-foreground"
                     title="Hide pipeline details"
                   >
                     Hide
-                  </button>
+                  </Button>
                 </dd>
               </>
             );

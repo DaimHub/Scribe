@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { NotificationPayload } from "@/lib/scribe-global";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 /**
  * Floating notification that appears a few minutes before a calendar event
@@ -72,39 +73,38 @@ export function MeetingNotification() {
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">{subline}</div>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon-xs"
           aria-label="Dismiss"
           onClick={() => window.scribe.floating.dismissNotification()}
-          className="-mr-1 -mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md text-base leading-none text-muted-foreground hover:bg-accent hover:text-foreground [-webkit-app-region:no-drag]"
+          className="-mr-1 -mt-1 [-webkit-app-region:no-drag]"
         >
-          ×
-        </button>
+          <span className="text-base leading-none">×</span>
+        </Button>
       </div>
 
       <div className="mt-auto flex items-center gap-2 [-webkit-app-region:no-drag]">
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           onClick={() => {
             if (event.hangout_link) {
               window.scribe.floating.openMeetingUrl(event.hangout_link);
             }
           }}
           disabled={!hasMeetingUrl}
-          className={cn(
-            "flex-1 rounded-full border border-border bg-input/40 px-3 py-1.5 text-xs font-medium",
-            "hover:bg-input/60 disabled:opacity-50",
-          )}
+          className="flex-1 rounded-full text-xs"
         >
           Join meeting
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          size="sm"
           onClick={() => window.scribe.floating.startScribeForEvent(event.id)}
-          className="flex-1 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/80"
+          className="flex-1 rounded-full text-xs"
         >
           Start Scribe
-        </button>
+        </Button>
       </div>
     </div>
   );

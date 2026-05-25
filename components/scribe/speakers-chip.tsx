@@ -6,6 +6,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Button } from "@/components/ui/button";
 import { SpeakerAvatar, SpeakerAvatarStack } from "./speaker-avatar";
 import { SampleAudioButton } from "./sample-audio-button";
 import type {
@@ -15,6 +16,7 @@ import type {
 } from "@/lib/scribe-global";
 import { useScribe } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { LINKED_BADGE, REVIEW_BADGE } from "@/lib/status-color";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   AlertCircleIcon,
@@ -68,7 +70,10 @@ export function SpeakersChip({ meetingId, speakers, max = 3 }: Props) {
         )}
         {reviewCount > 0 ? (
           <span
-            className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+              REVIEW_BADGE,
+            )}
             title={`${reviewCount} speaker${reviewCount === 1 ? "" : "s"} need review`}
           >
             <HugeiconsIcon icon={AlertCircleIcon} className="size-3" />
@@ -76,7 +81,10 @@ export function SpeakersChip({ meetingId, speakers, max = 3 }: Props) {
           </span>
         ) : linkedCount > 0 ? (
           <span
-            className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+              LINKED_BADGE,
+            )}
             title={`${linkedCount} of ${speakers.length} linked to your voice library`}
           >
             <HugeiconsIcon icon={CheckmarkCircle02Icon} className="size-3" />
@@ -187,25 +195,29 @@ function SpeakerRowDisplay({
       </div>
       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
         <SampleAudioButton filePath={speaker.sample_clip_path} />
-        <IconButton
-          icon={PencilEdit01Icon}
-          label="Rename speaker"
+        <Button
+          size="icon-xs"
+          variant="ghost"
           onClick={onEdit}
-        />
+          title="Rename speaker"
+          aria-label="Rename speaker"
+        >
+          <HugeiconsIcon icon={PencilEdit01Icon} />
+        </Button>
       </div>
     </div>
   );
 }
 
 function StatusBadge({ speaker }: { speaker: SpeakerRow }) {
+  const badgeBase =
+    "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium";
   if (speaker.needs_review === 1) {
     const pct = speaker.match_confidence
       ? ` ${Math.round(speaker.match_confidence * 100)}%`
       : "";
     return (
-      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
-        Review{pct}
-      </span>
+      <span className={cn(badgeBase, REVIEW_BADGE)}>Review{pct}</span>
     );
   }
   if (speaker.voice_library_id) {
@@ -213,9 +225,7 @@ function StatusBadge({ speaker }: { speaker: SpeakerRow }) {
       ? ` · ${Math.round(speaker.match_confidence * 100)}%`
       : "";
     return (
-      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
-        Linked{pct}
-      </span>
+      <span className={cn(badgeBase, LINKED_BADGE)}>Linked{pct}</span>
     );
   }
   return null;
@@ -321,7 +331,15 @@ function SpeakerRowEdit({
           <div className="text-xs text-muted-foreground">Pick a replacement</div>
         </div>
         <SampleAudioButton filePath={speaker.sample_clip_path} />
-        <IconButton icon={Cancel01Icon} label="Cancel" onClick={onDone} />
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          onClick={onDone}
+          title="Cancel"
+          aria-label="Cancel"
+        >
+          <HugeiconsIcon icon={Cancel01Icon} />
+        </Button>
       </div>
 
       {invitees.length === 0 && contacts.length === 0 ? (
@@ -397,35 +415,6 @@ function SuggestionSection({
         </button>
       ))}
     </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Bits: sample-clip play, generic icon button.
-// ---------------------------------------------------------------------------
-
-function IconButton({
-  icon,
-  label,
-  onClick,
-  disabled,
-}: {
-  icon: typeof PencilEdit01Icon;
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={label}
-      aria-label={label}
-      className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-    >
-      <HugeiconsIcon icon={icon} className="size-3.5" />
-    </button>
   );
 }
 

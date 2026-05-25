@@ -6,6 +6,7 @@ import type { MeetingSearchHit } from "@/lib/scribe-global";
 import { cn } from "@/lib/utils";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
+import { Button } from "@/components/ui/button";
 
 type MatchKind = MeetingSearchHit["matched_in"];
 
@@ -228,8 +229,9 @@ export function SearchBar() {
           </kbd>
         )}
         {query && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon-xs"
             onPointerDown={(e) => e.preventDefault()}
             onClick={() => {
               clear();
@@ -237,10 +239,10 @@ export function SearchBar() {
               inputRef.current?.focus();
             }}
             aria-label="Clear search"
-            className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="rounded-full"
           >
             <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
-          </button>
+          </Button>
         )}
       </div>
 

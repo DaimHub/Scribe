@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { RecordingStateSnapshot } from "@/lib/scribe-global";
 import { formatDuration } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 /**
  * Mini recording widget rendered in a floating, always-on-top BrowserWindow.
@@ -72,18 +73,15 @@ export function MiniRecorder() {
         )}
       </div>
 
-      <button
-        type="button"
+      <Button
+        variant="destructive"
+        size="xs"
         onClick={() => window.scribe.floating.requestStop()}
         disabled={state.kind !== "recording"}
-        className={cn(
-          "shrink-0 rounded-full bg-destructive/15 px-3 py-1 text-xs font-medium text-destructive",
-          "hover:bg-destructive/25 disabled:opacity-50",
-          "[-webkit-app-region:no-drag]",
-        )}
+        className="shrink-0 rounded-full [-webkit-app-region:no-drag]"
       >
         Stop
-      </button>
+      </Button>
     </div>
   );
 }

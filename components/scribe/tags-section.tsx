@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useScribe } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Cancel01Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 
@@ -40,14 +42,15 @@ export function TagsSection() {
           Tags
         </span>
         {activeTagId && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => setActiveTag(null)}
-            className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+            className="h-5 gap-0.5 px-1 text-[10px] text-muted-foreground hover:bg-transparent hover:text-foreground"
           >
             <HugeiconsIcon icon={Cancel01Icon} className="size-2.5" />
             clear
-          </button>
+          </Button>
         )}
       </div>
 
@@ -83,29 +86,30 @@ export function TagsSection() {
                   </span>
                 )}
               </button>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon-xs"
                 onClick={(e) => {
                   e.stopPropagation();
                   void deleteTag(t.id);
                 }}
                 aria-label={`Delete tag ${t.name}`}
-                className="mr-1 inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground group-hover:opacity-100"
+                className="mr-1 size-5 text-muted-foreground opacity-0 hover:bg-sidebar-accent hover:text-foreground group-hover:opacity-100"
               >
                 <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
-              </button>
+              </Button>
             </li>
           );
         })}
       </ul>
 
       {adding ? (
-        <input
+        <Input
           autoFocus
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="tag name"
-          className="mt-1 h-7 rounded-md border bg-background px-2 text-[12px] outline-none focus:ring-2 focus:ring-ring/40"
+          className="mt-1 h-7 text-[12px]"
           onKeyDown={async (e) => {
             if (e.key === "Enter") {
               const name = draft.trim();

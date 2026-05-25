@@ -103,14 +103,14 @@ export function TranscriptView({ detail }: { detail: MeetingDetail }) {
               }}
             >
               {hasAudio ? (
-                <button
-                  type="button"
+                <Button
+                  variant="link"
                   onClick={() => seekTo(meetingId, seg.start_ms / 1000)}
-                  className="w-12 shrink-0 pt-0.5 text-right font-mono text-[11px] tabular-nums text-muted-foreground hover:text-primary"
+                  className="h-auto w-12 shrink-0 justify-end p-0 pt-0.5 font-mono text-[11px] font-normal tabular-nums text-muted-foreground hover:text-primary hover:no-underline"
                   title="Jump to this moment"
                 >
                   {formatDuration(seg.start_ms)}
-                </button>
+                </Button>
               ) : (
                 <span className="w-12 shrink-0 pt-0.5 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
                   {formatDuration(seg.start_ms)}
