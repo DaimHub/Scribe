@@ -43,6 +43,12 @@ export interface FolderRow {
   name: string;
   position: number;
   created_at_ms: number;
+  /**
+   * Optional. When set, any meeting tagged with this tag is auto-moved into
+   * this folder (on attach). Used to keep tagged work organized without the
+   * user having to drag meetings around. Null = no association.
+   */
+  auto_tag_id: string | null;
 }
 
 export interface TranscriptRow {
@@ -76,6 +82,18 @@ export interface VoiceLibraryRow {
 
 export interface VoiceLibraryEntry extends VoiceLibraryRow {
   embedding: Float32Array;
+}
+
+/**
+ * VoiceLibraryRow enriched with "where did we last hear them" stats for the
+ * People view. `last_heard_ms`/`last_meeting_*` are null for library entries
+ * that haven't been linked back to a per-meeting speaker yet (e.g. an entry
+ * that was renamed but never appeared in a subsequent meeting).
+ */
+export interface VoiceLibraryPerson extends VoiceLibraryRow {
+  last_heard_ms: number | null;
+  last_meeting_id: string | null;
+  last_meeting_title: string | null;
 }
 
 export interface TaskRow {
@@ -144,7 +162,8 @@ CREATE TABLE IF NOT EXISTS folders (
   parent_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   position INTEGER NOT NULL DEFAULT 0,
-  created_at_ms INTEGER NOT NULL
+  created_at_ms INTEGER NOT NULL,
+  auto_tag_id TEXT REFERENCES tags(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id, position);
 
@@ -314,9 +333,21 @@ export function initDb(): DatabaseSync {
   if (!hasCol("pipeline_json")) {
     db.exec("ALTER TABLE meetings ADD COLUMN pipeline_json TEXT");
   }
+  const folderCols = db
+    .prepare("PRAGMA table_info(folders)")
+    .all() as Array<{ name: string }>;
+  if (!folderCols.some((c) => c.name === "auto_tag_id")) {
+    db.exec(
+      "ALTER TABLE folders ADD COLUMN auto_tag_id TEXT REFERENCES tags(id) ON DELETE SET NULL",
+    );
+  }
   // Indexes that reference columns added by migrations must run after the ALTERs
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_meetings_folder ON meetings(folder_id, position);",
+  );
+  // Lookups by auto_tag_id fire on every tag-attach — keep it indexed.
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_folders_auto_tag ON folders(auto_tag_id);",
   );
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_meetings_pinned ON meetings(pinned) WHERE pinned = 1;",
@@ -447,6 +478,36 @@ export function initDb(): DatabaseSync {
             created_at_ms, updated_at_ms
        FROM voice_library
        ORDER BY display_name ASC`,
+  );
+  // People view query: each row joins to its most recent appearance in a
+  // meeting. Correlated subqueries are fine here — idx_speakers_voice_lib
+  // keeps the per-row lookup at O(log n), and this query only runs on the
+  // People page open (not on every detail refresh).
+  stmts.listVoiceLibraryWithStats = db.prepare(
+    `SELECT vl.id, vl.display_name, vl.dim, vl.sample_clip_path,
+            vl.n_meetings, vl.created_at_ms, vl.updated_at_ms,
+            (SELECT MAX(m.started_at_ms)
+               FROM speakers s
+               JOIN meetings m ON m.id = s.meeting_id
+              WHERE s.voice_library_id = vl.id) AS last_heard_ms,
+            (SELECT s.meeting_id
+               FROM speakers s
+               JOIN meetings m ON m.id = s.meeting_id
+              WHERE s.voice_library_id = vl.id
+              ORDER BY m.started_at_ms DESC LIMIT 1) AS last_meeting_id,
+            (SELECT m.title
+               FROM speakers s
+               JOIN meetings m ON m.id = s.meeting_id
+              WHERE s.voice_library_id = vl.id
+              ORDER BY m.started_at_ms DESC LIMIT 1) AS last_meeting_title
+       FROM voice_library vl
+       ORDER BY COALESCE(
+         (SELECT MAX(m.started_at_ms)
+            FROM speakers s
+            JOIN meetings m ON m.id = s.meeting_id
+           WHERE s.voice_library_id = vl.id),
+         vl.updated_at_ms
+       ) DESC`,
   );
   stmts.listVoiceLibraryWithEmbeddings = db.prepare(
     `SELECT id, display_name, embedding, dim, sample_clip_path, n_meetings,
@@ -854,6 +915,11 @@ export function listVoiceLibrary(): VoiceLibraryRow[] {
   return stmts.listVoiceLibrary.all() as unknown as VoiceLibraryRow[];
 }
 
+export function listVoiceLibraryWithStats(): VoiceLibraryPerson[] {
+  initDb();
+  return stmts.listVoiceLibraryWithStats.all() as unknown as VoiceLibraryPerson[];
+}
+
 // In-memory cache of the deserialized voice library. Scoring a single
 // speaker calls this once per candidate; without the cache each scoring
 // pass redoes a full table read + N Float32Array copies.
@@ -1046,8 +1112,28 @@ export function attachTagToMeeting(
   tagId: string,
   auto = false,
 ): void {
-  initDb();
+  const db = initDb();
   stmts.attachTag.run(meetingId, tagId, auto ? 1 : 0);
+  // If a folder is associated with this tag, move the meeting into it (append
+  // to the end of that folder's list). Raw UPDATEs so it composes with callers
+  // that already opened a transaction — node sqlite doesn't support nested
+  // BEGIN, and `moveItem()` opens its own.
+  const folder = db
+    .prepare(`SELECT id FROM folders WHERE auto_tag_id = ? LIMIT 1`)
+    .get(tagId) as { id: string } | undefined;
+  if (!folder) return;
+  const current = db
+    .prepare(`SELECT folder_id FROM meetings WHERE id = ?`)
+    .get(meetingId) as { folder_id: string | null } | undefined;
+  if (!current || current.folder_id === folder.id) return;
+  const maxPos = db
+    .prepare(
+      `SELECT COALESCE(MAX(position), -1) AS p FROM meetings WHERE folder_id IS ?`,
+    )
+    .get(folder.id) as { p: number };
+  db.prepare(
+    `UPDATE meetings SET folder_id = ?, position = ? WHERE id = ?`,
+  ).run(folder.id, maxPos.p + 1, meetingId);
 }
 
 export function detachTagFromMeeting(meetingId: string, tagId: string): void {

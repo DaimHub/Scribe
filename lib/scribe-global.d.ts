@@ -38,6 +38,7 @@ export interface FolderRow {
   name: string;
   position: number;
   created_at_ms: number;
+  auto_tag_id: string | null;
 }
 
 export interface TreeSnapshot {
@@ -99,6 +100,23 @@ export interface VoiceLibraryRow {
   n_meetings: number;
   created_at_ms: number;
   updated_at_ms: number;
+}
+
+export interface VoiceLibraryPerson extends VoiceLibraryRow {
+  last_heard_ms: number | null;
+  last_meeting_id: string | null;
+  last_meeting_title: string | null;
+}
+
+export interface VoicePostProcessSummary {
+  meetingId: string;
+  autoLinked: Array<{
+    speakerId: string;
+    displayName: string;
+    confidence: number;
+  }>;
+  needsReviewCount: number;
+  totalSpeakers: number;
 }
 
 export interface PendingReviewSpeaker {
@@ -174,6 +192,17 @@ export interface CalendarEventRow {
   updated_at_ms: number;
 }
 
+export interface MeetingAttendee {
+  email: string;
+  name: string;
+  responseStatus: string | null;
+  self: boolean;
+  /** speaker_id in this meeting already tagged with this attendee's name. */
+  assignedTo: string | null;
+  /** voice_library entry id that matches this attendee's name. */
+  libraryId: string | null;
+}
+
 export interface MeetingDetail {
   meeting: MeetingRow;
   transcript: TranscriptRow[];
@@ -233,6 +262,7 @@ export interface ScribeAPI {
     create(opts: { name: string; parentId: string | null }): Promise<FolderRow>;
     rename(id: string, name: string): Promise<{ ok: boolean }>;
     delete(id: string): Promise<{ ok: boolean }>;
+    setAutoTag(folderId: string, tagId: string | null): Promise<{ ok: boolean }>;
   };
   whisperx: {
     isInstalled(): Promise<boolean>;
@@ -259,6 +289,10 @@ export interface ScribeAPI {
   };
   voice: {
     listLibrary(): Promise<VoiceLibraryRow[]>;
+    listPeople(): Promise<VoiceLibraryPerson[]>;
+    onPostProcess(
+      cb: (payload: VoicePostProcessSummary) => void,
+    ): () => void;
     renameLibraryEntry(
       id: string,
       displayName: string,
@@ -356,6 +390,7 @@ export interface ScribeAPI {
     >;
     linkedMeetingIds(): Promise<string[]>;
     activeNow(): Promise<CalendarEventRow | null>;
+    listAttendees(meetingId: string): Promise<MeetingAttendee[]>;
   };
   transcribe: {
     run(meetingId: string): Promise<{ ok: boolean; segments: number }>;

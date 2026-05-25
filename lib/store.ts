@@ -14,6 +14,7 @@ import type {
   PersonalTaskRow,
   RecordingStateSnapshot,
   TagRow,
+  VoicePostProcessSummary,
 } from "@/lib/scribe-global";
 import { startCapture, type CaptureHandle } from "@/lib/audio-capture";
 
@@ -39,8 +40,24 @@ export type ProcessingState =
       model?: string;
     };
 
-export type SidebarSection = "meetings" | "tasks" | "calendar" | "settings";
+export type SidebarSection =
+  | "meetings"
+  | "tasks"
+  | "calendar"
+  | "people"
+  | "settings";
 export type MeetingTab = "summary" | "transcript" | "tasks";
+
+/**
+ * Latest post-transcription auto-link summary, used by the InfoToast in
+ * AppShell. Null when there's nothing fresh to surface (toast was dismissed,
+ * the meeting had no auto-links, or no transcription has run this session).
+ */
+export interface AutoLinkToastState {
+  meetingId: string;
+  autoLinked: VoicePostProcessSummary["autoLinked"];
+  needsReviewCount: number;
+}
 
 interface ScribeState {
   folders: FolderRow[];
@@ -53,7 +70,6 @@ interface ScribeState {
   error: string | null;
   expandedFolderIds: Set<string>;
 
-  sidebarOpen: boolean;
   sidebarWidth: number;
   sidebarHydrated: boolean;
 
@@ -82,6 +98,13 @@ interface ScribeState {
   activeCalendarEvent: CalendarEventRow | null;
   linkedMeetingIds: Set<string>;
 
+  // Auto-link toast — populated when voice:postProcess fires with any
+  // autoLinked entries. Null while there's nothing to show.
+  autoLinkToast: AutoLinkToastState | null;
+  // Whether the VoiceTaggingPanel is open for the selected meeting. Kept
+  // collapsed by default — the meeting-header banner is the entry point.
+  voiceTaggingPanelOpen: boolean;
+
   init: () => Promise<void>;
   loadTree: () => Promise<void>;
   selectMeeting: (id: string | null) => Promise<void>;
@@ -98,11 +121,10 @@ interface ScribeState {
   createFolder: (parentId: string | null, name?: string) => Promise<FolderRow | null>;
   renameFolder: (id: string, name: string) => Promise<void>;
   deleteFolder: (id: string) => Promise<void>;
+  setFolderAutoTag: (folderId: string, tagId: string | null) => Promise<void>;
   moveItem: (target: MoveTarget) => Promise<void>;
   toggleExpand: (folderId: string) => void;
   setExpanded: (folderId: string, expanded: boolean) => void;
-  setSidebarOpen: (open: boolean) => void;
-  toggleSidebar: () => void;
   setSidebarWidth: (px: number) => void;
   persistSidebarWidth: () => void;
   hydrateSidebar: () => void;
@@ -144,6 +166,9 @@ interface ScribeState {
   linkMeetingToEvent: (meetingId: string, eventId: string) => Promise<void>;
   unlinkMeetingFromEvent: (meetingId: string) => Promise<void>;
   autoLinkMeeting: (meetingId: string, renameIfAuto?: boolean) => Promise<void>;
+
+  dismissAutoLinkToast: () => void;
+  setVoiceTaggingPanelOpen: (open: boolean) => void;
 }
 
 let captureHandle: CaptureHandle | null = null;
@@ -232,27 +257,22 @@ function saveExpanded(ids: Set<string>) {
   }
 }
 
-function loadSidebar(): { open: boolean; width: number } {
-  if (typeof window === "undefined") {
-    return { open: true, width: SIDEBAR_DEFAULT_WIDTH };
-  }
+function loadSidebarWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
   try {
     const raw = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
-    if (!raw) return { open: true, width: SIDEBAR_DEFAULT_WIDTH };
-    const data = JSON.parse(raw) as { open?: boolean; collapsed?: boolean; width?: number };
-    const width = clampWidth(data.width ?? SIDEBAR_DEFAULT_WIDTH);
-    // Migrate legacy `collapsed` key.
-    const open = data.open ?? (data.collapsed != null ? !data.collapsed : true);
-    return { open, width };
+    if (!raw) return SIDEBAR_DEFAULT_WIDTH;
+    const data = JSON.parse(raw) as { width?: number };
+    return clampWidth(data.width ?? SIDEBAR_DEFAULT_WIDTH);
   } catch {
-    return { open: true, width: SIDEBAR_DEFAULT_WIDTH };
+    return SIDEBAR_DEFAULT_WIDTH;
   }
 }
 
-function saveSidebar(state: { open: boolean; width: number }) {
+function saveSidebarWidth(width: number) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, JSON.stringify({ width }));
   } catch {
     /* ignore */
   }
@@ -275,9 +295,8 @@ export const useScribe = create<ScribeState>((set, get) => ({
   levels: { mic: 0, system: 0 },
   error: null,
   expandedFolderIds: loadExpanded(),
-  // SSR-safe defaults; replaced post-mount by `hydrateSidebar()` to avoid
-  // hydration mismatches with localStorage-derived values.
-  sidebarOpen: true,
+  // SSR-safe default; replaced post-mount by `hydrateSidebar()` to avoid a
+  // hydration mismatch when the persisted width differs from this default.
   sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
   sidebarHydrated: false,
 
@@ -296,6 +315,8 @@ export const useScribe = create<ScribeState>((set, get) => ({
   calendarEvents: [],
   activeCalendarEvent: null,
   linkedMeetingIds: new Set(),
+  autoLinkToast: null,
+  voiceTaggingPanelOpen: false,
 
   async init() {
     get().hydrateSidebar();
@@ -336,6 +357,34 @@ export const useScribe = create<ScribeState>((set, get) => ({
           };
         });
       }),
+      // Post-transcription voice-library summary. Fires once per transcribe
+      // run after diarization + library matching complete. We only surface a
+      // toast when at least one speaker was auto-linked — needs-review on its
+      // own surfaces via the in-header banner derived from speakers[].
+      window.scribe.voice.onPostProcess((p) => {
+        if (p.autoLinked.length === 0) {
+          // Still update the state so a renderer that's interested in
+          // needs-review count can observe transitions, but skip the toast.
+          set({
+            autoLinkToast:
+              p.needsReviewCount > 0
+                ? {
+                    meetingId: p.meetingId,
+                    autoLinked: [],
+                    needsReviewCount: p.needsReviewCount,
+                  }
+                : null,
+          });
+          return;
+        }
+        set({
+          autoLinkToast: {
+            meetingId: p.meetingId,
+            autoLinked: p.autoLinked,
+            needsReviewCount: p.needsReviewCount,
+          },
+        });
+      }),
       window.scribe.llm.onProgress((p) => {
         set((s) => {
           if (
@@ -361,6 +410,22 @@ export const useScribe = create<ScribeState>((set, get) => ({
       window.scribe.tree.onInvalidated(() => {
         scheduleTreeReload(() => {
           void get().loadTree();
+          // Also refetch the open meeting's detail — same broadcast fires when
+          // transcription/summary writes complete, and most failure paths in
+          // processMeeting/transcribe don't refresh detail on the catch side.
+          // Without this, segments land in SQLite but the open view stays
+          // empty until the user reloads.
+          const sel = get().selectedId;
+          if (sel) {
+            void window.scribe.meetings
+              .get(sel)
+              .then((detail) => {
+                if (detail && get().selectedId === sel) set({ detail });
+              })
+              .catch(() => {
+                /* non-fatal; next user action will refetch */
+              });
+          }
         });
       }),
     ];
@@ -391,12 +456,18 @@ export const useScribe = create<ScribeState>((set, get) => ({
 
   async selectMeeting(id) {
     if (id === null) {
-      set({ selectedId: null, detail: null });
+      set({ selectedId: null, detail: null, voiceTaggingPanelOpen: false });
       return;
     }
     // Picking a meeting always swaps the main view back to the meeting
-    // detail — replaces the dropped "Meetings" sidebar nav button.
-    set({ selectedId: id, activeSection: "meetings" });
+    // detail — replaces the dropped "Meetings" sidebar nav button. Reset the
+    // voice-tagging panel so switching meetings doesn't leave a stale open
+    // state pointing at the previous meeting.
+    set({
+      selectedId: id,
+      activeSection: "meetings",
+      voiceTaggingPanelOpen: false,
+    });
     try {
       const detail = await window.scribe.meetings.get(id);
       set({ detail });
@@ -686,6 +757,22 @@ export const useScribe = create<ScribeState>((set, get) => ({
     }
   },
 
+  async setFolderAutoTag(folderId, tagId) {
+    // Optimistic: flip the folder's auto_tag_id locally so the indicator
+    // updates immediately. Broadcast reconciles when the IPC returns.
+    const prev = get().folders;
+    set({
+      folders: prev.map((f) =>
+        f.id === folderId ? { ...f, auto_tag_id: tagId } : f,
+      ),
+    });
+    try {
+      await window.scribe.folders.setAutoTag(folderId, tagId);
+    } catch (err) {
+      set({ folders: prev, error: errMsg(err) });
+    }
+  },
+
   async deleteFolder(id) {
     const prevFolders = get().folders;
     const prevExpanded = get().expandedFolderIds;
@@ -740,18 +827,6 @@ export const useScribe = create<ScribeState>((set, get) => ({
     set({ expandedFolderIds: next });
   },
 
-  setSidebarOpen(open) {
-    if (open === get().sidebarOpen) return;
-    set({ sidebarOpen: open });
-    saveSidebar({ open, width: get().sidebarWidth });
-  },
-
-  toggleSidebar() {
-    const open = !get().sidebarOpen;
-    set({ sidebarOpen: open });
-    saveSidebar({ open, width: get().sidebarWidth });
-  },
-
   // Live width update — NO localStorage write. Called many times per frame
   // during a resize drag; persisting on every move would block the main
   // thread (~5-10ms per write) and make the drag feel laggy. Pair with
@@ -763,17 +838,12 @@ export const useScribe = create<ScribeState>((set, get) => ({
   },
 
   persistSidebarWidth() {
-    saveSidebar({ open: get().sidebarOpen, width: get().sidebarWidth });
+    saveSidebarWidth(get().sidebarWidth);
   },
 
   hydrateSidebar() {
     if (get().sidebarHydrated) return;
-    const data = loadSidebar();
-    set({
-      sidebarOpen: data.open,
-      sidebarWidth: data.width,
-      sidebarHydrated: true,
-    });
+    set({ sidebarWidth: loadSidebarWidth(), sidebarHydrated: true });
   },
 
   clearError() {
@@ -1125,6 +1195,14 @@ export const useScribe = create<ScribeState>((set, get) => ({
     } catch (err) {
       set({ error: errMsg(err) });
     }
+  },
+
+  dismissAutoLinkToast() {
+    set({ autoLinkToast: null });
+  },
+
+  setVoiceTaggingPanelOpen(open) {
+    set({ voiceTaggingPanelOpen: open });
   },
 }));
 

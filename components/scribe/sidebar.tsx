@@ -6,7 +6,6 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarHeader,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import {
   SIDEBAR_MAX_WIDTH,
@@ -20,15 +19,14 @@ import {
   Calendar03Icon,
   FolderAddIcon,
   Settings01Icon,
-  SidebarLeft01Icon,
   TaskDone01Icon,
+  UserMultipleIcon,
 } from "@hugeicons/core-free-icons";
 import { TreeView } from "./tree/tree-view";
 import { PinnedSection } from "./tree/pinned-section";
 import { TagsSection } from "./tags-section";
 
 export function ScribeSidebar() {
-  const { toggleSidebar } = useSidebar();
   const createFolder = useScribe((s) => s.createFolder);
   const activeSection = useScribe((s) => s.activeSection);
   const setActiveSection = useScribe((s) => s.setActiveSection);
@@ -36,18 +34,10 @@ export function ScribeSidebar() {
   return (
     <ShadSidebar collapsible="offcanvas" variant="sidebar">
       <SidebarHeader className="gap-0 p-0">
-        <div className="flex h-12 items-center justify-between gap-1 px-2 [-webkit-app-region:drag]">
-          <div className="flex-1" />
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            title="Hide sidebar"
-            aria-label="Hide sidebar"
-            className="inline-flex size-7 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [-webkit-app-region:no-drag]"
-          >
-            <HugeiconsIcon icon={SidebarLeft01Icon} className="size-4" />
-          </button>
-        </div>
+        {/* Empty draggable strip — leaves space for macOS traffic lights and
+            preserves the window-drag handle that previously sat behind the
+            Hide-sidebar button. */}
+        <div className="h-12 [-webkit-app-region:drag]" />
       </SidebarHeader>
 
       <SidebarContent className="gap-0">
@@ -114,6 +104,7 @@ function SectionNav({
   }> = [
     { id: "tasks", label: "Tasks", icon: TaskDone01Icon },
     { id: "calendar", label: "Calendar", icon: Calendar03Icon },
+    { id: "people", label: "People", icon: UserMultipleIcon },
   ];
   return (
     <nav className="flex flex-col gap-px px-2 pb-2 pt-1">
@@ -151,7 +142,6 @@ function SidebarResizer() {
   const sidebarWidth = useScribe((s) => s.sidebarWidth);
   const setSidebarWidth = useScribe((s) => s.setSidebarWidth);
   const persistSidebarWidth = useScribe((s) => s.persistSidebarWidth);
-  const { state } = useSidebar();
   const [dragging, setDragging] = useState(false);
   const startRef = useRef<{ x: number; w: number } | null>(null);
   // rAF coalescing — at most one width update per animation frame even if
@@ -161,13 +151,12 @@ function SidebarResizer() {
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (state !== "expanded") return;
       e.preventDefault();
       e.stopPropagation();
       startRef.current = { x: e.clientX, w: sidebarWidth };
       setDragging(true);
     },
-    [sidebarWidth, state],
+    [sidebarWidth],
   );
 
   useEffect(() => {
@@ -221,8 +210,6 @@ function SidebarResizer() {
       }
     };
   }, [dragging, setSidebarWidth, persistSidebarWidth]);
-
-  if (state !== "expanded") return null;
 
   return (
     <button

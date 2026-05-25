@@ -33,6 +33,7 @@ interface FolderRow {
   name: string;
   position: number;
   created_at_ms: number;
+  auto_tag_id: string | null;
 }
 
 interface TreeSnapshot {
@@ -76,6 +77,23 @@ interface VoiceLibraryRow {
   n_meetings: number;
   created_at_ms: number;
   updated_at_ms: number;
+}
+
+interface VoiceLibraryPerson extends VoiceLibraryRow {
+  last_heard_ms: number | null;
+  last_meeting_id: string | null;
+  last_meeting_title: string | null;
+}
+
+interface VoicePostProcessSummary {
+  meetingId: string;
+  autoLinked: Array<{
+    speakerId: string;
+    displayName: string;
+    confidence: number;
+  }>;
+  needsReviewCount: number;
+  totalSpeakers: number;
 }
 
 interface PendingReviewSpeaker {
@@ -149,6 +167,15 @@ interface CalendarEventRow {
   attendees_json: string | null;
   meeting_id: string | null;
   updated_at_ms: number;
+}
+
+interface MeetingAttendee {
+  email: string;
+  name: string;
+  responseStatus: string | null;
+  self: boolean;
+  assignedTo: string | null;
+  libraryId: string | null;
 }
 
 interface MeetingDetail {
@@ -232,6 +259,16 @@ const scribe = {
   voice: {
     listLibrary: (): Promise<VoiceLibraryRow[]> =>
       ipcRenderer.invoke("voice:listLibrary"),
+    listPeople: (): Promise<VoiceLibraryPerson[]> =>
+      ipcRenderer.invoke("voice:listPeople"),
+    onPostProcess: (
+      cb: (payload: VoicePostProcessSummary) => void,
+    ): (() => void) => {
+      const handler = (_: unknown, payload: VoicePostProcessSummary) =>
+        cb(payload);
+      ipcRenderer.on("voice:postProcess", handler);
+      return () => ipcRenderer.removeListener("voice:postProcess", handler);
+    },
     renameLibraryEntry: (
       id: string,
       displayName: string,
@@ -381,6 +418,8 @@ const scribe = {
       ipcRenderer.invoke("calendar:linkedMeetingIds"),
     activeNow: (): Promise<CalendarEventRow | null> =>
       ipcRenderer.invoke("calendar:activeNow"),
+    listAttendees: (meetingId: string): Promise<MeetingAttendee[]> =>
+      ipcRenderer.invoke("calendar:listAttendees", meetingId),
   },
 
   tree: {
@@ -401,6 +440,8 @@ const scribe = {
       ipcRenderer.invoke("folders:rename", id, name),
     delete: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("folders:delete", id),
+    setAutoTag: (folderId: string, tagId: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("folders:setAutoTag", folderId, tagId),
   },
 
   whisperx: {

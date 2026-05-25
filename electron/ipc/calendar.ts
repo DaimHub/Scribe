@@ -5,6 +5,7 @@ import {
   disconnectAccount,
   findActiveEventNow,
   getLinkedEventForMeeting,
+  getMeetingAttendees,
   linkEventToMeeting,
   listAccounts,
   listEvents,
@@ -95,4 +96,8 @@ export function registerCalendarIpc(): void {
   ipcMain.handle("calendar:linkedMeetingIds", () => listLinkedMeetingIdsPublic());
 
   ipcMain.handle("calendar:activeNow", () => findActiveEventNow());
+
+  ipcMain.handle("calendar:listAttendees", (_e, meetingId: string) =>
+    getMeetingAttendees(meetingId),
+  );
 }

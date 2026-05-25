@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ScribeSidebar } from "./sidebar";
 import { MeetingView } from "./meeting-view";
@@ -9,7 +9,12 @@ import { RecordingBar } from "./recording-bar";
 import { TopBar } from "./top-bar";
 import { useScribe } from "@/lib/store";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { AlertCircleIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import {
+  AlertCircleIcon,
+  Cancel01Icon,
+  UserCheck01Icon,
+} from "@hugeicons/core-free-icons";
+import type { AutoLinkToastState } from "@/lib/store";
 
 // CalendarView and SettingsView are large (calendar grid + ~1400 LoC of
 // settings) and not on the meeting hot path. Lazy them out of the initial
@@ -20,6 +25,9 @@ const CalendarView = lazy(() =>
 const SettingsView = lazy(() =>
   import("./settings-view").then((m) => ({ default: m.SettingsView })),
 );
+const PeopleView = lazy(() =>
+  import("./people-view").then((m) => ({ default: m.PeopleView })),
+);
 
 function LazyViewFallback() {
   return (
@@ -29,44 +37,23 @@ function LazyViewFallback() {
   );
 }
 
-const PEEK_HOVER_OPEN_MS = 120;
-const PEEK_HOVER_CLOSE_MS = 320;
-// Reveal strip generous enough that a casual mouse approach catches it.
-const REVEAL_STRIP_PX = 20;
-// Buffer past the visible sidebar where the cursor is still "in" the peek
-// area — beyond this, we schedule a close.
-const PEEK_BUFFER_PX = 32;
-
 export function AppShell() {
   const init = useScribe((s) => s.init);
-  const sidebarOpen = useScribe((s) => s.sidebarOpen);
   const sidebarWidth = useScribe((s) => s.sidebarWidth);
-  const setSidebarOpen = useScribe((s) => s.setSidebarOpen);
-
-  // Peek state lives here (above SidebarProvider) so we can fold it into the
-  // effective `open` we hand the provider — peek = ephemeral open.
-  const [peekRequested, setPeekRequested] = useState(false);
-  const peeking = !sidebarOpen && peekRequested;
-  const effectiveOpen = sidebarOpen || peeking;
 
   useEffect(() => {
     void init();
   }, [init]);
 
-  // When the user explicitly toggles (button, Cmd+B), persist their preference
-  // and clear any active peek so the next state reflects their choice.
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setPeekRequested(false);
-      setSidebarOpen(next);
-    },
-    [setSidebarOpen],
-  );
+  // Sidebar is permanently open — user can resize but not hide. We control
+  // `open` so nothing (Cmd+B in the shadcn primitive, mobile sheet, etc.) can
+  // flip it. onOpenChange is a no-op for the same reason.
+  const noop = useCallback(() => {}, []);
 
   return (
     <SidebarProvider
-      open={effectiveOpen}
-      onOpenChange={handleOpenChange}
+      open
+      onOpenChange={noop}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
@@ -75,105 +62,17 @@ export function AppShell() {
       }
       className="h-screen w-screen overflow-hidden"
     >
-      <AppShellInner
-        peeking={peeking}
-        sidebarPersistedOpen={sidebarOpen}
-        sidebarWidth={sidebarWidth}
-        setPeekRequested={setPeekRequested}
-      />
+      <AppShellInner />
     </SidebarProvider>
   );
 }
 
-interface AppShellInnerProps {
-  peeking: boolean;
-  sidebarPersistedOpen: boolean;
-  sidebarWidth: number;
-  setPeekRequested: (v: boolean) => void;
-}
-
-function AppShellInner({
-  peeking,
-  sidebarPersistedOpen,
-  sidebarWidth,
-  setPeekRequested,
-}: AppShellInnerProps) {
+function AppShellInner() {
   const error = useScribe((s) => s.error);
   const clearError = useScribe((s) => s.clearError);
   const activeSection = useScribe((s) => s.activeSection);
 
   useGlobalShortcuts();
-
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-
-  const cancelOpen = useCallback(() => {
-    if (openTimer.current != null) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-  }, []);
-
-  const cancelClose = useCallback(() => {
-    if (closeTimer.current != null) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-  }, []);
-
-  const cancelTimers = useCallback(() => {
-    cancelOpen();
-    cancelClose();
-  }, [cancelOpen, cancelClose]);
-
-  const scheduleOpen = useCallback(() => {
-    if (openTimer.current != null) return; // already pending
-    cancelClose();
-    openTimer.current = window.setTimeout(() => {
-      openTimer.current = null;
-      setPeekRequested(true);
-    }, PEEK_HOVER_OPEN_MS);
-  }, [cancelClose, setPeekRequested]);
-
-  const scheduleClose = useCallback(() => {
-    if (closeTimer.current != null) return; // already pending
-    cancelOpen();
-    closeTimer.current = window.setTimeout(() => {
-      closeTimer.current = null;
-      setPeekRequested(false);
-    }, PEEK_HOVER_CLOSE_MS);
-  }, [cancelOpen, setPeekRequested]);
-
-  useEffect(() => cancelTimers, [cancelTimers]);
-
-  const isCollapsed = !sidebarPersistedOpen;
-
-  // While peeking, watch the cursor globally. The hover zone unmounts once peek
-  // opens (so it can never receive a spurious mouseleave from the sidebar
-  // sliding over it). Close is decided purely from cursor X vs the visible
-  // sidebar bounds — robust against layout shifts and z-index races.
-  useEffect(() => {
-    if (sidebarPersistedOpen) return; // pinned open — nothing to manage
-    if (!peeking) return; // hover zone handles the open case
-
-    const closeBoundary = sidebarWidth + PEEK_BUFFER_PX;
-
-    function onMove(e: MouseEvent) {
-      if (e.clientX > closeBoundary) scheduleClose();
-      else cancelClose();
-    }
-    function onLeave() {
-      // Cursor left the window entirely — schedule close.
-      scheduleClose();
-    }
-
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseleave", onLeave);
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseleave", onLeave);
-    };
-  }, [peeking, sidebarPersistedOpen, sidebarWidth, scheduleClose, cancelClose]);
 
   return (
     <div className="relative flex h-full w-full">
@@ -188,6 +87,11 @@ function AppShellInner({
             <CalendarView />
           </Suspense>
         )}
+        {activeSection === "people" && (
+          <Suspense fallback={<LazyViewFallback />}>
+            <PeopleView />
+          </Suspense>
+        )}
         {activeSection === "settings" && (
           <Suspense fallback={<LazyViewFallback />}>
             <SettingsView />
@@ -195,21 +99,114 @@ function AppShellInner({
         )}
       </SidebarInset>
 
-      {/* Reveal strip — only when collapsed AND not yet peeking. Once peek
-          opens, this unmounts and global mousemove takes over so we never get
-          a spurious mouseleave from the sidebar sliding over us. */}
-      {isCollapsed && !peeking && (
-        <div
-          className="absolute left-0 top-0 h-full"
-          style={{ width: `${REVEAL_STRIP_PX}px`, zIndex: 5 }}
-          onMouseEnter={scheduleOpen}
-          onMouseLeave={cancelOpen}
-          aria-hidden
-        />
-      )}
-
       <RecordingBar />
       {error && <ErrorToast message={error} onDismiss={clearError} />}
+      <AutoLinkToast />
+    </div>
+  );
+}
+
+function AutoLinkToast() {
+  const toast = useScribe((s) => s.autoLinkToast);
+  const dismiss = useScribe((s) => s.dismissAutoLinkToast);
+  const selectMeeting = useScribe((s) => s.selectMeeting);
+  const setActiveSection = useScribe((s) => s.setActiveSection);
+  if (!toast || toast.autoLinked.length === 0) return null;
+  function onReview() {
+    if (!toast) return;
+    // Jump to the meeting and open the People view alongside, so the user can
+    // confirm or correct the auto-link in either context.
+    void selectMeeting(toast.meetingId);
+    setActiveSection("people");
+    dismiss();
+  }
+  return <AutoLinkToastView toast={toast} onDismiss={dismiss} onReview={onReview} />;
+}
+
+const AUTO_LINK_TOAST_TIMEOUT_MS = 8000;
+
+function AutoLinkToastView({
+  toast,
+  onDismiss,
+  onReview,
+}: {
+  toast: AutoLinkToastState;
+  onDismiss: () => void;
+  onReview: () => void;
+}) {
+  const timerRef = useRef<number | null>(null);
+  const clear = useCallback(() => {
+    if (timerRef.current != null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+  const arm = useCallback(() => {
+    clear();
+    timerRef.current = window.setTimeout(onDismiss, AUTO_LINK_TOAST_TIMEOUT_MS);
+  }, [clear, onDismiss]);
+  useEffect(() => {
+    arm();
+    return clear;
+  }, [arm, clear, toast]);
+
+  const names = toast.autoLinked.map((a) => a.displayName);
+  const namesText =
+    names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+  const headline =
+    toast.autoLinked.length === 1
+      ? "Auto-linked 1 speaker"
+      : `Auto-linked ${toast.autoLinked.length} speakers`;
+  const reviewSuffix =
+    toast.needsReviewCount > 0
+      ? ` · ${toast.needsReviewCount} need${
+          toast.needsReviewCount === 1 ? "s" : ""
+        } review`
+      : "";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      onMouseEnter={clear}
+      onMouseLeave={arm}
+      onFocus={clear}
+      onBlur={arm}
+      className="pointer-events-auto absolute right-4 top-16 z-50 w-[min(28rem,calc(100vw-2rem))] animate-in fade-in-0 slide-in-from-top-2 duration-150"
+    >
+      <div className="flex items-start gap-3 rounded-2xl border bg-card/95 p-3 pr-2 shadow-2xl ring-1 ring-black/5 backdrop-blur-md">
+        <div
+          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+          aria-hidden
+        >
+          <HugeiconsIcon icon={UserCheck01Icon} className="size-4" />
+        </div>
+
+        <div className="min-w-0 flex-1 pt-0.5">
+          <div className="text-sm font-semibold leading-tight text-foreground">
+            {headline}
+            {reviewSuffix}
+          </div>
+          <div className="mt-1 break-words text-xs leading-snug text-muted-foreground">
+            {namesText} from your voice library.
+          </div>
+          <button
+            type="button"
+            onClick={onReview}
+            className="mt-1.5 text-xs font-medium text-primary underline-offset-2 hover:underline"
+          >
+            Review in People
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
+        </button>
+      </div>
     </div>
   );
 }

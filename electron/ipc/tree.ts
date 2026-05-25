@@ -5,6 +5,7 @@ import {
   listTree,
   moveItem,
   renameFolder,
+  setFolderAutoTag,
   setMeetingPinned,
   type MoveTarget,
 } from "../services/tree.js";
@@ -26,6 +27,14 @@ export function registerTreeIpc(): void {
     deleteFolder(id);
     return { ok: true };
   });
+
+  ipcMain.handle(
+    "folders:setAutoTag",
+    (_e, folderId: string, tagId: string | null) => {
+      setFolderAutoTag(folderId, tagId);
+      return { ok: true };
+    },
+  );
 
   ipcMain.handle("tree:move", (_e, target: MoveTarget) => {
     moveItem(target);

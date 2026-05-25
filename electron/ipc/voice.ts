@@ -5,6 +5,7 @@ import {
   getSpeakerEmbedding,
   listSpeakers,
   listVoiceLibrary,
+  listVoiceLibraryWithStats,
   renameVoiceLibraryEntry,
   setSpeakerMatch,
   type SpeakerRow,
@@ -32,6 +33,8 @@ export function registerVoiceIpc(): void {
   // ---- Voice library ----
 
   ipcMain.handle("voice:listLibrary", () => listVoiceLibrary());
+
+  ipcMain.handle("voice:listPeople", () => listVoiceLibraryWithStats());
 
   ipcMain.handle(
     "voice:renameLibraryEntry",

@@ -13,9 +13,11 @@ import {
 } from "./db.js";
 import type { Pipeline } from "./db.js";
 import { extractClip, mixToMono16k } from "./audio-mix.js";
+import { speakerHintForMeeting } from "./calendar.js";
 import {
   isInstalled as sidecarInstalled,
   runWhisperX,
+  type RunResult,
   type SpeakerEmbedding,
 } from "./python-sidecar.js";
 import { getHfToken } from "./settings.js";
@@ -96,6 +98,11 @@ export async function transcribeMeeting(opts: {
   });
 
   const hfToken = await getHfToken();
+  // Cap pyannote's clustering with the linked event's invitee count when
+  // available. Tighter bounds noticeably improve diarization on short
+  // meetings where pyannote tends to over-split. Falls back to 0/0 (no
+  // hint) when the meeting isn't linked or the event has no attendees.
+  const { minSpeakers, maxSpeakers } = speakerHintForMeeting(opts.meetingId);
   const pipeline: Pipeline = {};
   const result = await runWhisperX(
     {
@@ -104,6 +111,8 @@ export async function transcribeMeeting(opts: {
       language: "auto",
       diarize: !!hfToken,
       hfToken: hfToken ?? undefined,
+      minSpeakers,
+      maxSpeakers,
       extractEmbeddings: !!hfToken,
     },
     (e) => {
@@ -165,8 +174,12 @@ export async function transcribeMeeting(opts: {
   // global library → either auto-assign a known name, flag for user review, or
   // leave as an unknown speaker. Best-effort — failures here must not break
   // transcription.
-  let autoAssigned = 0;
-  let flaggedForReview = 0;
+  let postProcess: VoicePostProcessSummary = {
+    meetingId: opts.meetingId,
+    autoLinked: [],
+    needsReviewCount: 0,
+    totalSpeakers: speakerLabels.size,
+  };
   if (wasDiarized && result.speakers && result.speakers.length > 0) {
     try {
       const speakersDir = path.join(workDir, "speakers");
@@ -176,10 +189,15 @@ export async function transcribeMeeting(opts: {
         speakersDir,
         mixedWavPath: mixedPath,
         speakers: result.speakers,
+        segments: result.segments,
         defaultLabels: speakerLabels,
       });
-      autoAssigned = matchSummary.autoAssigned;
-      flaggedForReview = matchSummary.flaggedForReview;
+      postProcess = {
+        meetingId: opts.meetingId,
+        autoLinked: matchSummary.autoLinked,
+        needsReviewCount: matchSummary.needsReviewCount,
+        totalSpeakers: speakerLabels.size,
+      };
     } catch (err) {
       console.warn("[whisper] voice-library matching failed:", err);
     }
@@ -188,8 +206,10 @@ export async function transcribeMeeting(opts: {
   setStatus(opts.meetingId, wasDiarized ? "diarized" : "transcribed");
   const matchNote =
     wasDiarized && result.speakers && result.speakers.length > 0
-      ? `, ${autoAssigned} auto-tagged${
-          flaggedForReview > 0 ? `, ${flaggedForReview} to review` : ""
+      ? `, ${postProcess.autoLinked.length} auto-tagged${
+          postProcess.needsReviewCount > 0
+            ? `, ${postProcess.needsReviewCount} to review`
+            : ""
         }`
       : "";
   emitProgress(opts.meetingId, {
@@ -197,6 +217,15 @@ export async function transcribeMeeting(opts: {
     pct: 100,
     note: `${count} segments, ${speakerLabels.size} speaker(s)${matchNote}`,
   });
+  // Broadcast a structured summary so the renderer can show an auto-link toast
+  // and pop a review banner when speakers landed in the borderline / unknown
+  // bands. Fired AFTER status flip so the next detail refresh has the
+  // post-match speakers table state.
+  if (wasDiarized) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send("voice:postProcess", postProcess);
+    }
+  }
   return {
     ok: true,
     segments: count,
@@ -205,30 +234,63 @@ export async function transcribeMeeting(opts: {
   };
 }
 
+/**
+ * Summary of the post-transcription voice-library pass, broadcast to all
+ * renderer windows as `voice:postProcess`. The renderer subscribes to surface
+ * an auto-link toast and pop a review banner without having to diff speakers
+ * across detail refreshes.
+ */
+export interface VoicePostProcessSummary {
+  meetingId: string;
+  autoLinked: Array<{
+    speakerId: string;
+    displayName: string;
+    confidence: number;
+  }>;
+  needsReviewCount: number;
+  totalSpeakers: number;
+}
+
 async function matchSpeakersAgainstLibrary(opts: {
   meetingId: string;
   speakersDir: string;
   mixedWavPath: string;
   speakers: SpeakerEmbedding[];
+  segments: RunResult["segments"];
   defaultLabels: Map<string, string>;
-}): Promise<{ autoAssigned: number; flaggedForReview: number }> {
-  let autoAssigned = 0;
-  let flaggedForReview = 0;
+}): Promise<{
+  autoLinked: VoicePostProcessSummary["autoLinked"];
+  needsReviewCount: number;
+}> {
+  const autoLinked: VoicePostProcessSummary["autoLinked"] = [];
+  let needsReviewCount = 0;
 
   for (const sp of opts.speakers) {
     if (!sp.id) continue;
     const fallbackName =
       opts.defaultLabels.get(sp.id) ?? prettySpeakerName(sp.id, 0);
 
-    // 1) Extract a sample wav clip so the UI can play a preview later.
+    // 1) Extract a distinctive sample wav clip so the UI can play a preview
+    //    later. We deliberately ignore the sidecar-supplied window — it picks
+    //    the first segment, which tends to capture greetings and crosstalk.
+    //    Instead, pick the speaker's longest solo segment so the user has the
+    //    clearest possible voice fingerprint to identify.
+    const window =
+      pickDistinctSampleWindow(opts.segments, sp.id) ??
+      // Fallback to the sidecar window when transcription couldn't isolate a
+      // segment long enough (very short interjections, single-word
+      // contributions).
+      (sp.sample_end_ms > sp.sample_start_ms
+        ? { startMs: sp.sample_start_ms, endMs: sp.sample_end_ms }
+        : null);
     let sampleClipPath: string | null = null;
-    if (sp.sample_end_ms > sp.sample_start_ms) {
+    if (window) {
       const out = path.join(opts.speakersDir, `${safeFilename(sp.id)}.wav`);
       try {
         await extractClip({
           inputWavPath: opts.mixedWavPath,
-          startMs: sp.sample_start_ms,
-          endMs: sp.sample_end_ms,
+          startMs: window.startMs,
+          endMs: window.endMs,
           outputPath: out,
         });
         sampleClipPath = out;
@@ -263,7 +325,11 @@ async function matchSpeakersAgainstLibrary(opts: {
         libraryId: verdict.best.entry.id,
         newEmbedding: embedding,
       });
-      autoAssigned++;
+      autoLinked.push({
+        speakerId: sp.id,
+        displayName: verdict.best.entry.display_name,
+        confidence: verdict.best.similarity,
+      });
     } else if (verdict.decision === "needs-review" && verdict.best) {
       // Keep generic "Speaker N" label until the user confirms or rejects.
       setSpeakerMatch({
@@ -274,7 +340,7 @@ async function matchSpeakersAgainstLibrary(opts: {
         needsReview: true,
         displayName: fallbackName,
       });
-      flaggedForReview++;
+      needsReviewCount++;
     } else {
       setSpeakerMatch({
         meetingId: opts.meetingId,
@@ -284,11 +350,53 @@ async function matchSpeakersAgainstLibrary(opts: {
         needsReview: true,
         displayName: fallbackName,
       });
-      flaggedForReview++;
+      needsReviewCount++;
     }
   }
 
-  return { autoAssigned, flaggedForReview };
+  return { autoLinked, needsReviewCount };
+}
+
+/**
+ * Pick the longest segment attributed to `speakerId` and trim it to a
+ * "distinctive" sample window: skip the first 0.5s (often a breath or
+ * trailing fragment from the previous speaker) and cap at 8s. Returns null
+ * when no segments were attributed to this speaker — caller should fall back
+ * to whatever the sidecar suggested.
+ *
+ * Why longest: pyannote occasionally splits a single utterance into two
+ * adjacent segments, but the longest is virtually always a clean run from
+ * the same speaker. Picking it over the first segment avoids capturing
+ * common phrases like "yeah, exactly" that don't carry much voice
+ * information.
+ */
+function pickDistinctSampleWindow(
+  segments: RunResult["segments"],
+  speakerId: string,
+): { startMs: number; endMs: number } | null {
+  const OFFSET_MS = 500;
+  const MAX_MS = 8000;
+  const MIN_USABLE_MS = 1500;
+  let best: { start: number; end: number; dur: number } | null = null;
+  for (const seg of segments) {
+    if (seg.speaker !== speakerId) continue;
+    const dur = seg.end_ms - seg.start_ms;
+    if (!best || dur > best.dur) {
+      best = { start: seg.start_ms, end: seg.end_ms, dur };
+    }
+  }
+  if (!best) return null;
+  // Apply the 0.5s offset only when there's enough room for a usable clip
+  // after it; otherwise short interjections would shrink to a click.
+  if (best.dur >= MIN_USABLE_MS + OFFSET_MS) {
+    const startMs = best.start + OFFSET_MS;
+    const endMs = Math.min(best.end, startMs + MAX_MS);
+    return { startMs, endMs };
+  }
+  return {
+    startMs: best.start,
+    endMs: Math.min(best.end, best.start + MAX_MS),
+  };
 }
 
 function safeFilename(s: string): string {

@@ -12,6 +12,7 @@ import {
   Mic01Icon,
   MoreHorizontalIcon,
   PencilEdit01Icon,
+  Tag01Icon,
 } from "@hugeicons/core-free-icons";
 import { cn } from "@/lib/utils";
 import { useScribe, formatDuration } from "@/lib/store";
@@ -94,13 +95,11 @@ export function TreeNode({
   const deleteFolder = useScribe((s) => s.deleteFolder);
   const setPinned = useScribe((s) => s.setPinned);
   const createFolder = useScribe((s) => s.createFolder);
+  const setFolderAutoTag = useScribe((s) => s.setFolderAutoTag);
 
   const isSelected = data.kind === "meeting" && selectedId === data.id;
   const tagPairs = useScribe((s) => s.meetingTagPairs);
   const allTags = useScribe((s) => s.allTags);
-  const linkedMeetingIds = useScribe((s) => s.linkedMeetingIds);
-  const isLinkedToEvent =
-    data.kind === "meeting" && linkedMeetingIds.has(data.id);
   const meetingTagDots = useMemo(() => {
     if (data.kind !== "meeting") return [] as string[];
     const ids = tagPairs
@@ -173,13 +172,35 @@ export function TreeNode({
           className="size-4 shrink-0 text-muted-foreground"
         />
       ) : (
-        <span
-          className={cn(
-            "inline-block size-1.5 shrink-0 rounded-full",
-            STATUS_DOT[data.meeting.status],
-          )}
-        />
+        <>
+          <span
+            className={cn(
+              "inline-block size-1.5 shrink-0 rounded-full",
+              STATUS_DOT[data.meeting.status],
+            )}
+          />
+          {meetingTagDots.map((c, i) => (
+            <span
+              key={i}
+              className="inline-block size-1.5 shrink-0 rounded-full"
+              style={{ background: c }}
+            />
+          ))}
+        </>
       )}
+
+      {isFolder && data.kind === "folder" && data.folder.auto_tag_id && (() => {
+        const tag = allTags.find((t) => t.id === data.folder.auto_tag_id);
+        if (!tag) return null;
+        return (
+          <span
+            className="inline-block size-1.5 shrink-0 rounded-full"
+            style={{ background: tag.color ?? "var(--muted-foreground)" }}
+            title={`Auto-tag: #${tag.name}`}
+            aria-label={`Auto-tag: ${tag.name}`}
+          />
+        );
+      })()}
 
       {node.isEditing ? (
         <input
@@ -223,6 +244,13 @@ export function TreeNode({
             label="Start meeting in folder"
             onClick={() => void startRecording({ folderId: data.id })}
           />
+          {data.kind === "folder" && (
+            <FolderAutoTagMenu
+              folderId={data.id}
+              currentTagId={data.folder.auto_tag_id}
+              onChange={(tagId) => void setFolderAutoTag(data.id, tagId)}
+            />
+          )}
           <IconBtn
             icon={Delete02Icon}
             label="Delete folder"
@@ -240,23 +268,6 @@ export function TreeNode({
         </div>
       ) : (
         <>
-          {isLinkedToEvent && (
-            <span
-              className="size-1.5 shrink-0 rounded-full bg-emerald-500"
-              title="Linked to calendar event"
-            />
-          )}
-          {meetingTagDots.length > 0 && (
-            <span className="flex shrink-0 items-center gap-0.5 pr-1">
-              {meetingTagDots.map((c, i) => (
-                <span
-                  key={i}
-                  className="size-1.5 rounded-full"
-                  style={{ background: c }}
-                />
-              ))}
-            </span>
-          )}
           {data.kind === "meeting" && data.meeting.duration_ms != null && (
             <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground opacity-0 group-hover:opacity-100">
               {formatDuration(data.meeting.duration_ms)}
@@ -302,5 +313,68 @@ export function TreeNode({
         </>
       )}
     </div>
+  );
+}
+
+function FolderAutoTagMenu({
+  currentTagId,
+  onChange,
+}: {
+  folderId: string;
+  currentTagId: string | null;
+  onChange: (tagId: string | null) => void;
+}) {
+  const allTags = useScribe((s) => s.allTags);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        title={currentTagId ? "Change auto-tag" : "Set auto-tag"}
+        className={cn(
+          "inline-flex size-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-accent hover:text-foreground",
+          currentTagId ? "text-foreground" : "text-muted-foreground",
+        )}
+        aria-label="Auto-tag"
+      >
+        <HugeiconsIcon icon={Tag01Icon} className="size-3.5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="max-h-64 w-56 overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+          Auto-move when tagged with
+        </div>
+        <DropdownMenuItem onClick={() => onChange(null)}>
+          <span className="text-muted-foreground">
+            {currentTagId ? "✓ Clear" : "None"}
+          </span>
+        </DropdownMenuItem>
+        {allTags.length > 0 && <DropdownMenuSeparator />}
+        {allTags.length === 0 ? (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+            No tags yet — create one from a meeting first.
+          </div>
+        ) : (
+          allTags.map((tag) => (
+            <DropdownMenuItem
+              key={tag.id}
+              onClick={() => onChange(tag.id === currentTagId ? null : tag.id)}
+            >
+              <span
+                className="inline-block size-1.5 shrink-0 rounded-full"
+                style={{ background: tag.color ?? "var(--muted-foreground)" }}
+              />
+              <span className="flex-1 truncate">{tag.name}</span>
+              {tag.id === currentTagId && (
+                <span className="text-muted-foreground">✓</span>
+              )}
+            </DropdownMenuItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

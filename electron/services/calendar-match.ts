@@ -94,18 +94,27 @@ function scoreCandidates(
     const overlapMs = Math.max(0, overlapEnd - overlapStart);
     if (overlapMs === 0) continue;
 
-    const overlapRatio = overlapMs / eventDuration;
-    if (overlapRatio < MIN_OVERLAP_RATIO) continue;
+    const recDuration = Math.max(1, recEnd - recStart);
+    // Two views: how much of the event we caught, and how much of the
+    // recording sat inside the event. A 10-min recording fully inside a 30-min
+    // event has recordingCoverage=1.0 even though eventCoverage=0.33 — that's
+    // still a strong signal we recorded that event. Old formula only looked at
+    // eventCoverage and missed late joins / early bails.
+    const eventCoverage = overlapMs / eventDuration;
+    const recordingCoverage = overlapMs / recDuration;
+    const overlapSignal = Math.max(eventCoverage, recordingCoverage);
+    if (eventCoverage < MIN_OVERLAP_RATIO && recordingCoverage < MIN_OVERLAP_RATIO) {
+      continue;
+    }
 
     const titleScore = titleSimilarity(recording.title, ev.title);
 
     // Weighted score. Overlap dominates; title is a tiebreaker.
-    const score =
-      Math.min(1, overlapRatio) * 0.75 + titleScore * 0.25;
+    const score = Math.min(1, overlapSignal) * 0.75 + titleScore * 0.25;
 
     let reason: MatchReason = "overlap";
     if (titleScore >= 0.6) reason = "overlap+title";
-    if (overlapRatio < 0.5 && titleScore >= 0.8) reason = "title";
+    if (overlapSignal < 0.5 && titleScore >= 0.8) reason = "title";
 
     result.push({
       event: ev,

@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  Calendar01Icon,
   Cancel01Icon,
   PauseIcon,
   PlayIcon,
@@ -10,7 +11,10 @@ import {
   UserAdd01Icon,
   UserCheck01Icon,
 } from "@hugeicons/core-free-icons";
-import type { PendingReviewSpeaker } from "@/lib/scribe-global";
+import type {
+  MeetingAttendee,
+  PendingReviewSpeaker,
+} from "@/lib/scribe-global";
 import { useScribe, speakerHue } from "@/lib/store";
 import { useSampleClipUrl } from "@/lib/voice-clip";
 import { Button } from "@/components/ui/button";
@@ -18,33 +22,37 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 export function VoiceTaggingPanel({ meetingId }: { meetingId: string }) {
+  const open = useScribe((s) => s.voiceTaggingPanelOpen);
+  const setOpen = useScribe((s) => s.setVoiceTaggingPanelOpen);
   const [pending, setPending] = useState<PendingReviewSpeaker[]>([]);
+  const [attendees, setAttendees] = useState<MeetingAttendee[]>([]);
   const [loading, setLoading] = useState(true);
-  const [collapsed, setCollapsed] = useState(false);
   const refresh = useCallback(async () => {
     try {
-      const next = await window.scribe.voice.pendingReview(meetingId);
-      setPending(next);
+      const [nextPending, nextAttendees] = await Promise.all([
+        window.scribe.voice.pendingReview(meetingId),
+        window.scribe.calendar.listAttendees(meetingId),
+      ]);
+      setPending(nextPending);
+      setAttendees(nextAttendees);
+      // Auto-close the panel when all reviews are resolved — keeps the screen
+      // from showing an empty banner placeholder after the last assignment.
+      if (nextPending.length === 0) setOpen(false);
     } finally {
       setLoading(false);
     }
-  }, [meetingId]);
+  }, [meetingId, setOpen]);
 
   useEffect(() => {
-    setLoading(true);
     void refresh();
   }, [refresh]);
 
-  if (loading || pending.length === 0) return null;
+  if (!open || loading || pending.length === 0) return null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-8 pb-4">
       <div className="rounded-lg border bg-card/50">
-        <button
-          type="button"
-          onClick={() => setCollapsed((c) => !c)}
-          className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-card"
-        >
+        <div className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-sm">
           <div className="flex items-center gap-2">
             <HugeiconsIcon
               icon={UserCheck01Icon}
@@ -57,21 +65,24 @@ export function VoiceTaggingPanel({ meetingId }: { meetingId: string }) {
               Help Scribe recognize who&apos;s speaking across meetings
             </span>
           </div>
-          <span className="text-xs text-muted-foreground">
-            {collapsed ? "Show" : "Hide"}
-          </span>
-        </button>
-        {!collapsed && (
-          <div className="flex flex-col gap-3 border-t px-4 py-3">
-            {pending.map((sp) => (
-              <PendingRow
-                key={`${sp.meeting_id}:${sp.speaker_id}`}
-                speaker={sp}
-                onResolved={refresh}
-              />
-            ))}
-          </div>
-        )}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Hide
+          </button>
+        </div>
+        <div className="flex flex-col gap-3 border-t px-4 py-3">
+          {pending.map((sp) => (
+            <PendingRow
+              key={`${sp.meeting_id}:${sp.speaker_id}`}
+              speaker={sp}
+              attendees={attendees}
+              onResolved={refresh}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -79,9 +90,11 @@ export function VoiceTaggingPanel({ meetingId }: { meetingId: string }) {
 
 function PendingRow({
   speaker,
+  attendees,
   onResolved,
 }: {
   speaker: PendingReviewSpeaker;
+  attendees: MeetingAttendee[];
   onResolved: () => void;
 }) {
   const reloadDetail = useScribe((s) => s.selectMeeting);
@@ -92,6 +105,23 @@ function PendingRow({
   const hue = speakerHue(speaker.speaker_id);
   const color = `oklch(0.72 0.13 ${hue})`;
   const tint = `color-mix(in oklab, oklch(0.72 0.13 ${hue}) 14%, transparent)`;
+
+  // Hide attendees already tagged on other speakers in this meeting, and any
+  // whose name already shows up as a "Sounds like" library candidate — those
+  // are higher-signal (matched on voice, not just on the invite list).
+  const candidateLibraryIds = useMemo(
+    () => new Set(speaker.candidates.map((c) => c.library_id)),
+    [speaker.candidates],
+  );
+  const visibleAttendees = useMemo(
+    () =>
+      attendees.filter(
+        (a) =>
+          !a.assignedTo &&
+          !(a.libraryId && candidateLibraryIds.has(a.libraryId)),
+      ),
+    [attendees, candidateLibraryIds],
+  );
 
   const refreshAll = async () => {
     onResolved();
@@ -113,9 +143,7 @@ function PendingRow({
     }
   }
 
-  async function createNew() {
-    const name = newName.trim();
-    if (!name) return;
+  async function createFromName(name: string) {
     setActing(true);
     try {
       await window.scribe.voice.createFromSpeaker(
@@ -127,6 +155,23 @@ function PendingRow({
     } finally {
       setActing(false);
     }
+  }
+
+  async function assignAttendee(attendee: MeetingAttendee) {
+    // Route through assignToLibrary when this attendee's name already matches
+    // an existing voice-library entry — that merges the new embedding rather
+    // than creating a duplicate "Alice" row in the library.
+    if (attendee.libraryId) {
+      await assign(attendee.libraryId, attendee.name);
+    } else {
+      await createFromName(attendee.name);
+    }
+  }
+
+  async function createNew() {
+    const name = newName.trim();
+    if (!name) return;
+    await createFromName(name);
   }
 
   async function dismiss() {
@@ -187,6 +232,24 @@ function PendingRow({
         </div>
       )}
 
+      {visibleAttendees.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            On this calendar invite
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {visibleAttendees.map((a) => (
+              <AttendeeButton
+                key={a.email}
+                attendee={a}
+                disabled={acting}
+                onClick={() => assignAttendee(a)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col gap-1.5">
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
           Or add as new person
@@ -213,6 +276,38 @@ function PendingRow({
         </div>
       </div>
     </div>
+  );
+}
+
+function AttendeeButton({
+  attendee,
+  disabled,
+  onClick,
+}: {
+  attendee: MeetingAttendee;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const recognized = !!attendee.libraryId;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      onClick={onClick}
+      disabled={disabled}
+      className="gap-1.5"
+      title={
+        recognized
+          ? `${attendee.email} · already in your voice library`
+          : attendee.email
+      }
+    >
+      <HugeiconsIcon icon={recognized ? UserCheck01Icon : Calendar01Icon} />
+      <span>{attendee.name}</span>
+      {attendee.self && (
+        <span className="font-mono text-[10px] text-muted-foreground">you</span>
+      )}
+    </Button>
   );
 }
 

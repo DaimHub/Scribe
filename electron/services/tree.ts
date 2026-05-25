@@ -62,7 +62,7 @@ export function listTree(): TreeSnapshot {
   const db = initDb();
   const folders = db
     .prepare(
-      `SELECT id, parent_id, name, position, created_at_ms FROM folders ORDER BY parent_id, position ASC, name ASC`,
+      `SELECT id, parent_id, name, position, created_at_ms, auto_tag_id FROM folders ORDER BY parent_id, position ASC, name ASC`,
     )
     .all() as unknown as FolderRow[];
   const meetings = db
@@ -89,6 +89,7 @@ export function createFolder(opts: {
     name: opts.name.trim() || "Untitled folder",
     position,
     created_at_ms: Date.now(),
+    auto_tag_id: null,
   };
 }
 
@@ -97,6 +98,29 @@ export function renameFolder(id: string, name: string): void {
   if (!next) return;
   initDb().prepare(`UPDATE folders SET name = ? WHERE id = ?`).run(next, id);
   broadcastTreeInvalidated();
+}
+
+/**
+ * Associate a tag with a folder so future meeting↔tag attachments auto-move
+ * the meeting into this folder. Pass null to clear. Unique by tag — assigning
+ * a tag to a new folder removes it from any previous folder. Doesn't move
+ * already-tagged meetings (would be surprising mass relocation).
+ */
+export function setFolderAutoTag(folderId: string, tagId: string | null): void {
+  const db = initDb();
+  if (tagId) {
+    db.prepare(`UPDATE folders SET auto_tag_id = NULL WHERE auto_tag_id = ?`).run(tagId);
+  }
+  db.prepare(`UPDATE folders SET auto_tag_id = ? WHERE id = ?`).run(tagId, folderId);
+  broadcastTreeInvalidated();
+}
+
+/** Returns the folder_id associated with this tag, or null. */
+export function getFolderIdForAutoTag(tagId: string): string | null {
+  const row = initDb()
+    .prepare(`SELECT id FROM folders WHERE auto_tag_id = ? LIMIT 1`)
+    .get(tagId) as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 /**

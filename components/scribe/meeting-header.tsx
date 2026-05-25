@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,10 +12,11 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowRight01Icon,
   MoreHorizontalIcon,
+  UserCheck01Icon,
 } from "@hugeicons/core-free-icons";
 import type { FolderRow, MeetingDetail, Pipeline } from "@/lib/scribe-global";
 import { useScribe, formatDuration } from "@/lib/store";
-import { SpeakerAvatarStack } from "./speaker-avatar";
+import { SpeakersChip } from "./speakers-chip";
 import { TagChips } from "./tag-chips";
 import { LinkedEventRow } from "./linked-event-row";
 
@@ -58,6 +59,31 @@ function PipelineBadges({ pipeline }: { pipeline: Pipeline }) {
   );
 }
 
+// Persisted per-user toggle for the Pipeline metadata row. Defaults to shown.
+const PIPELINE_VISIBILITY_KEY = "scribe:showPipeline";
+
+function usePipelineVisibility(): [boolean, (next: boolean) => void] {
+  // SSR-safe initial — flip after mount to whatever the user stored.
+  const [show, setShow] = useState(true);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(PIPELINE_VISIBILITY_KEY);
+      if (stored === "false") setShow(false);
+    } catch {
+      /* localStorage blocked — keep default */
+    }
+  }, []);
+  const update = (next: boolean) => {
+    setShow(next);
+    try {
+      window.localStorage.setItem(PIPELINE_VISIBILITY_KEY, next ? "true" : "false");
+    } catch {
+      /* ignore */
+    }
+  };
+  return [show, update];
+}
+
 export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
   const rename = useScribe((s) => s.renameMeeting);
   const transcribe = useScribe((s) => s.transcribe);
@@ -68,6 +94,10 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
   const folders = useScribe((s) => s.folders);
   const setExpanded = useScribe((s) => s.setExpanded);
   const selectMeeting = useScribe((s) => s.selectMeeting);
+  const setVoiceTaggingPanelOpen = useScribe((s) => s.setVoiceTaggingPanelOpen);
+  const voiceTaggingPanelOpen = useScribe((s) => s.voiceTaggingPanelOpen);
+  const [showPipeline, setShowPipeline] = usePipelineVisibility();
+  const reviewCount = detail.speakers.filter((s) => s.needs_review === 1).length;
 
   const [title, setTitle] = useState(detail.meeting.title);
   const [lastSyncedId, setLastSyncedId] = useState(detail.meeting.id);
@@ -208,18 +238,12 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
           </dd>
 
           <dt className="self-center text-muted-foreground">Speakers</dt>
-          <dd className="flex items-center gap-2.5">
-            {detail.speakers.length > 0 ? (
-              <>
-                <SpeakerAvatarStack speakers={detail.speakers} max={3} />
-                <span className="text-muted-foreground">·</span>
-                <span>
-                  {detail.speakers.map((s) => s.display_name).join(", ")}
-                </span>
-              </>
-            ) : (
-              <span className="text-muted-foreground">No speakers identified</span>
-            )}
+          <dd>
+            <SpeakersChip
+              meetingId={detail.meeting.id}
+              speakers={detail.speakers}
+              max={3}
+            />
           </dd>
 
           <dt className="self-center text-muted-foreground">Status</dt>
@@ -237,14 +261,64 @@ export function MeetingHeader({ detail }: { detail: MeetingDetail }) {
             <TagChips meetingId={detail.meeting.id} />
           </dd>
 
+          {reviewCount > 0 && (
+            <>
+              <dt className="self-center text-muted-foreground">Review</dt>
+              <dd>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setVoiceTaggingPanelOpen(!voiceTaggingPanelOpen)
+                  }
+                  className="inline-flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
+                  aria-expanded={voiceTaggingPanelOpen}
+                >
+                  <HugeiconsIcon icon={UserCheck01Icon} className="size-3.5" />
+                  <span>
+                    {reviewCount} {reviewCount === 1 ? "speaker needs" : "speakers need"} your input
+                  </span>
+                  <span className="text-amber-700/70 dark:text-amber-400/70">
+                    · {voiceTaggingPanelOpen ? "Hide" : "Review"}
+                  </span>
+                </button>
+              </dd>
+            </>
+          )}
+
           {(() => {
             const pipeline = parsePipeline(detail.meeting.pipeline_json);
             if (!pipeline || Object.keys(pipeline).length === 0) return null;
+            if (!showPipeline) {
+              // Compact one-liner when hidden — keeps an obvious way back in
+              // without occupying real estate.
+              return (
+                <>
+                  <dt className="self-center text-muted-foreground">Pipeline</dt>
+                  <dd>
+                    <button
+                      type="button"
+                      onClick={() => setShowPipeline(true)}
+                      className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                    >
+                      Show
+                    </button>
+                  </dd>
+                </>
+              );
+            }
             return (
               <>
                 <dt className="self-center text-muted-foreground">Pipeline</dt>
-                <dd>
+                <dd className="flex items-center gap-2">
                   <PipelineBadges pipeline={pipeline} />
+                  <button
+                    type="button"
+                    onClick={() => setShowPipeline(false)}
+                    className="text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+                    title="Hide pipeline details"
+                  >
+                    Hide
+                  </button>
                 </dd>
               </>
             );

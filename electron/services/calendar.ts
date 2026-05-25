@@ -15,6 +15,8 @@ import {
   listCalendarEvents as dbListEvents,
   listCalendarEventsOverlapping,
   listLinkedMeetingIds,
+  listSpeakers,
+  listVoiceLibrary,
   setTitle,
   updateCalendarAccountTokens,
   upsertCalendarEvent,
@@ -349,8 +351,18 @@ interface GoogleCalendarEvent {
   hangoutLink?: string;
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
-  attendees?: Array<{ email: string; displayName?: string; responseStatus?: string }>;
+  attendees?: GoogleCalendarAttendee[];
   status?: string;
+}
+
+interface GoogleCalendarAttendee {
+  email: string;
+  displayName?: string;
+  responseStatus?: string;
+  self?: boolean;
+  resource?: boolean;
+  organizer?: boolean;
+  optional?: boolean;
 }
 
 function dateToMs(d?: { dateTime?: string; date?: string }): number | null {
@@ -527,6 +539,117 @@ export function getLinkedEventForMeeting(
 
 export function listLinkedMeetingIdsPublic(): string[] {
   return listLinkedMeetingIds();
+}
+
+// --- Attendees ---------------------------------------------------------------
+
+export interface MeetingAttendee {
+  email: string;
+  /** displayName when present, else email local-part — never empty. */
+  name: string;
+  responseStatus: string | null;
+  /** Calendar owner's own attendee row — usually the user. */
+  self: boolean;
+  /** Speaker_id (in the current meeting) this attendee is already tagged as,
+   *  matched by exact display_name equality. UI uses this to disable chips. */
+  assignedTo: string | null;
+  /** Existing voice library entry matching this name. UI uses this to route
+   *  to assignToLibrary instead of createFromSpeaker on click. */
+  libraryId: string | null;
+}
+
+function emailLocalPart(email: string): string {
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}
+
+function parseAttendees(json: string | null): GoogleCalendarAttendee[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as GoogleCalendarAttendee[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Attendees worth showing as speaker candidates: drop room/resource calendars
+ *  and people who declined. Keeps `self` (user is in the recording too). */
+function speakingAttendees(
+  attendees: GoogleCalendarAttendee[],
+): GoogleCalendarAttendee[] {
+  return attendees.filter(
+    (a) => !a.resource && a.responseStatus !== "declined",
+  );
+}
+
+/**
+ * Enriched attendee list for the voice-tagging panel: tells the UI which
+ * attendees are already tagged in this meeting and which are recognized
+ * across the voice library.
+ */
+export function getMeetingAttendees(meetingId: string): MeetingAttendee[] {
+  const event = getCalendarEventForMeeting(meetingId);
+  if (!event) return [];
+  const raw = speakingAttendees(parseAttendees(event.attendees_json));
+  if (raw.length === 0) return [];
+
+  const speakers = listSpeakers(meetingId);
+  const library = listVoiceLibrary();
+  // Index by lowercased name so "alice" === "Alice".
+  const speakerByName = new Map<string, string>();
+  for (const s of speakers) {
+    if (s.display_name) {
+      speakerByName.set(s.display_name.toLowerCase(), s.speaker_id);
+    }
+  }
+  const libraryByName = new Map<string, string>();
+  for (const l of library) {
+    libraryByName.set(l.display_name.toLowerCase(), l.id);
+  }
+
+  const out: MeetingAttendee[] = raw.map((a) => {
+    const name = (a.displayName ?? "").trim() || emailLocalPart(a.email);
+    const key = name.toLowerCase();
+    return {
+      email: a.email,
+      name,
+      responseStatus: a.responseStatus ?? null,
+      self: !!a.self,
+      assignedTo: speakerByName.get(key) ?? null,
+      libraryId: libraryByName.get(key) ?? null,
+    };
+  });
+
+  // Sort: not-yet-assigned first, then recognized (already in library), then
+  // self (you), then everyone else alphabetically. Putting `self` after
+  // recognized assumes the user is usually less interesting to tag than the
+  // counterparts they're meeting with.
+  out.sort((a, b) => {
+    if (!!a.assignedTo !== !!b.assignedTo) return a.assignedTo ? 1 : -1;
+    if (!!a.libraryId !== !!b.libraryId) return a.libraryId ? -1 : 1;
+    if (a.self !== b.self) return a.self ? 1 : -1;
+    return a.name.localeCompare(b.name);
+  });
+  return out;
+}
+
+/**
+ * Upper-bound hint for diarization based on the linked event's invitee list.
+ * Returns 0 (== "no hint") when there's no event or no usable attendees.
+ *
+ * We add +1 to the count to leave room for an uninvited speaker (drop-ins are
+ * common) and cap at 12 to keep pyannote's clustering well-behaved.
+ */
+export function speakerHintForMeeting(meetingId: string): {
+  minSpeakers: number;
+  maxSpeakers: number;
+} {
+  const event = getCalendarEventForMeeting(meetingId);
+  if (!event) return { minSpeakers: 0, maxSpeakers: 0 };
+  const count = speakingAttendees(parseAttendees(event.attendees_json)).length;
+  if (count <= 0) return { minSpeakers: 0, maxSpeakers: 0 };
+  return { minSpeakers: 0, maxSpeakers: Math.min(count + 1, 12) };
 }
 
 /**
