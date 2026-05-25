@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { SpeakerAvatar, SpeakerAvatarStack } from "./speaker-avatar";
+import { SampleAudioButton } from "./sample-audio-button";
 import type {
   MeetingAttendee,
   SpeakerRow,
@@ -21,12 +22,9 @@ import {
   Calendar01Icon,
   Cancel01Icon,
   CheckmarkCircle02Icon,
-  PauseIcon,
   PencilEdit01Icon,
-  PlayIcon,
   UserCheck01Icon,
 } from "@hugeicons/core-free-icons";
-import { useSampleClipUrl } from "@/lib/voice-clip";
 
 interface Props {
   meetingId: string;
@@ -188,7 +186,7 @@ function SpeakerRowDisplay({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-        <SampleClipButton filePath={speaker.sample_clip_path} />
+        <SampleAudioButton filePath={speaker.sample_clip_path} />
         <IconButton
           icon={PencilEdit01Icon}
           label="Rename speaker"
@@ -322,7 +320,7 @@ function SpeakerRowEdit({
           </div>
           <div className="text-xs text-muted-foreground">Pick a replacement</div>
         </div>
-        <SampleClipButton filePath={speaker.sample_clip_path} />
+        <SampleAudioButton filePath={speaker.sample_clip_path} />
         <IconButton icon={Cancel01Icon} label="Cancel" onClick={onDone} />
       </div>
 
@@ -431,84 +429,3 @@ function IconButton({
   );
 }
 
-function SampleClipButton({
-  filePath,
-  variant = "icon",
-}: {
-  filePath: string | null;
-  variant?: "icon" | "inline";
-}) {
-  const { url, loading, error } = useSampleClipUrl(filePath);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = useState(false);
-
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-    const onEnded = () => setPlaying(false);
-    const onPause = () => setPlaying(false);
-    const onPlay = () => setPlaying(true);
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("play", onPlay);
-    return () => {
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("play", onPlay);
-    };
-  }, [url]);
-
-  function toggle() {
-    const el = audioRef.current;
-    if (!el) return;
-    if (playing) el.pause();
-    else void el.play();
-  }
-
-  if (!filePath || error) {
-    // Inline variant shows nothing when absent; icon variant collapses too.
-    return null;
-  }
-
-  if (variant === "inline") {
-    return (
-      <>
-        <button
-          type="button"
-          onClick={toggle}
-          disabled={loading || !url}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-md border bg-background/80 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent",
-            playing && "bg-accent text-foreground",
-          )}
-        >
-          <HugeiconsIcon
-            icon={playing ? PauseIcon : PlayIcon}
-            className="size-3"
-          />
-          {playing ? "Pause sample" : loading ? "Loading…" : "Play voice sample"}
-        </button>
-        {url && <audio ref={audioRef} src={url} preload="auto" />}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={loading || !url}
-        title={playing ? "Pause sample" : "Play voice sample"}
-        aria-label={playing ? "Pause voice sample" : "Play voice sample"}
-        className="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-      >
-        <HugeiconsIcon
-          icon={playing ? PauseIcon : PlayIcon}
-          className="size-3.5"
-        />
-      </button>
-      {url && <audio ref={audioRef} src={url} preload="auto" />}
-    </>
-  );
-}

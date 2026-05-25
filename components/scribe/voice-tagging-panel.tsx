@@ -1,12 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Calendar01Icon,
   Cancel01Icon,
-  PauseIcon,
-  PlayIcon,
   Tick02Icon,
   UserAdd01Icon,
   UserCheck01Icon,
@@ -16,10 +14,9 @@ import type {
   PendingReviewSpeaker,
 } from "@/lib/scribe-global";
 import { useScribe, speakerHue } from "@/lib/store";
-import { useSampleClipUrl } from "@/lib/voice-clip";
+import { SampleAudioButton } from "./sample-audio-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
 
 export function VoiceTaggingPanel({ meetingId }: { meetingId: string }) {
   const open = useScribe((s) => s.voiceTaggingPanelOpen);
@@ -198,7 +195,11 @@ function PendingRow({
           />
           {speaker.display_name}
         </span>
-        <SampleClipPlayer filePath={speaker.sample_clip_path} />
+        <SampleAudioButton
+          filePath={speaker.sample_clip_path}
+          variant="labeled"
+          emptyFallback="text"
+        />
         <div className="ml-auto">
           <Button
             size="xs"
@@ -340,60 +341,3 @@ function CandidateButton({
   );
 }
 
-function SampleClipPlayer({ filePath }: { filePath: string | null }) {
-  const { url, loading, error } = useSampleClipUrl(filePath);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = useState(false);
-
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-    const onEnded = () => setPlaying(false);
-    const onPause = () => setPlaying(false);
-    const onPlay = () => setPlaying(true);
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("play", onPlay);
-    return () => {
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("play", onPlay);
-    };
-  }, [url]);
-
-  function toggle() {
-    const el = audioRef.current;
-    if (!el) return;
-    if (playing) el.pause();
-    else void el.play();
-  }
-
-  if (!filePath) {
-    return (
-      <span className="text-xs text-muted-foreground">No sample available</span>
-    );
-  }
-  if (error) {
-    return (
-      <span className="text-xs text-destructive" title={error}>
-        Sample failed to load
-      </span>
-    );
-  }
-
-  return (
-    <>
-      <Button
-        size="xs"
-        variant="outline"
-        onClick={toggle}
-        disabled={loading || !url}
-        className={cn("gap-1.5", playing && "bg-muted")}
-      >
-        <HugeiconsIcon icon={playing ? PauseIcon : PlayIcon} />
-        {playing ? "Pause" : loading ? "Loading…" : "Play sample"}
-      </Button>
-      {url && <audio ref={audioRef} src={url} preload="auto" />}
-    </>
-  );
-}

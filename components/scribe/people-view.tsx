@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { VoiceLibraryPerson } from "@/lib/scribe-global";
 import { useScribe } from "@/lib/store";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -8,13 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { SpeakerAvatar } from "./speaker-avatar";
-import { useSampleClipUrl } from "@/lib/voice-clip";
+import { SampleAudioButton } from "./sample-audio-button";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Delete02Icon,
-  PauseIcon,
   PencilEdit01Icon,
-  PlayIcon,
   UserMultipleIcon,
 } from "@hugeicons/core-free-icons";
 
@@ -174,7 +172,7 @@ function PersonRow({
         <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
       </div>
 
-      <SamplePlayButton filePath={person.sample_clip_path} />
+      <SampleAudioButton filePath={person.sample_clip_path} />
 
       {person.last_meeting_id && (
         <Button
@@ -266,52 +264,3 @@ function IconBtn({
   );
 }
 
-function SamplePlayButton({ filePath }: { filePath: string | null }) {
-  const { url, loading, error } = useSampleClipUrl(filePath);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playing, setPlaying] = useState(false);
-
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el) return;
-    const onEnded = () => setPlaying(false);
-    const onPause = () => setPlaying(false);
-    const onPlay = () => setPlaying(true);
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("play", onPlay);
-    return () => {
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("play", onPlay);
-    };
-  }, [url]);
-
-  function toggle() {
-    const el = audioRef.current;
-    if (!el) return;
-    if (playing) el.pause();
-    else void el.play();
-  }
-
-  if (!filePath || error) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={loading || !url}
-        title={playing ? "Pause sample" : "Play voice sample"}
-        aria-label={playing ? "Pause voice sample" : "Play voice sample"}
-        className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-      >
-        <HugeiconsIcon
-          icon={playing ? PauseIcon : PlayIcon}
-          className="size-3.5"
-        />
-      </button>
-      {url && <audio ref={audioRef} src={url} preload="auto" />}
-    </>
-  );
-}
