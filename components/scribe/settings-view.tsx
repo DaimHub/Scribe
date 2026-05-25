@@ -31,6 +31,7 @@ import {
   Mic01Icon,
   PauseIcon,
   PlayIcon,
+  Refresh01Icon,
   Settings01Icon,
   UserMultipleIcon,
   VoiceIdIcon,
@@ -750,6 +751,7 @@ function CalendarSection() {
   const loadAccounts = useScribe((s) => s.loadCalendarAccounts);
   const connect = useScribe((s) => s.connectGoogleCalendar);
   const disconnect = useScribe((s) => s.disconnectCalendar);
+  const syncCalendar = useScribe((s) => s.syncCalendar);
 
   const [hasCreds, setHasCreds] = useState<boolean | null>(null);
   const [masked, setMasked] = useState<MaskedCreds | null>(null);
@@ -758,6 +760,21 @@ function CalendarSection() {
   const [clientSecretInput, setClientSecretInput] = useState("");
   const [savingCreds, setSavingCreds] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+
+  // Sync window: a generous range centered on now. Calendar view uses tighter
+  // ranges for fast paint, but a manual settings-side sync should refresh a
+  // wide enough window to be useful regardless of where the user lands next.
+  const DAY = 24 * 60 * 60 * 1000;
+  async function onSync(accountId: string) {
+    setSyncingId(accountId);
+    try {
+      const now = Date.now();
+      await syncCalendar(accountId, now - 30 * DAY, now + 90 * DAY);
+    } finally {
+      setSyncingId(null);
+    }
+  }
 
   async function refreshCreds() {
     try {
@@ -895,6 +912,8 @@ function CalendarSection() {
               <CalendarAccountRow
                 key={a.id}
                 account={a}
+                syncing={syncingId === a.id}
+                onSync={() => void onSync(a.id)}
                 onDisconnect={() => disconnect(a.id)}
               />
             ))}
@@ -1042,9 +1061,13 @@ function formatRemaining(totalSec: number): string {
 
 function CalendarAccountRow({
   account,
+  syncing,
+  onSync,
   onDisconnect,
 }: {
   account: CalendarAccountPublic;
+  syncing: boolean;
+  onSync: () => void;
   onDisconnect: () => void;
 }) {
   const connectedLabel = useMemo(
@@ -1069,6 +1092,18 @@ function CalendarAccountRow({
           connected {connectedLabel}
         </span>
       </div>
+      <button
+        type="button"
+        onClick={onSync}
+        disabled={syncing}
+        title="Sync now"
+        className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+      >
+        <HugeiconsIcon
+          icon={Refresh01Icon}
+          className={cn("size-3.5", syncing && "animate-spin")}
+        />
+      </button>
       <button
         type="button"
         onClick={onDisconnect}
