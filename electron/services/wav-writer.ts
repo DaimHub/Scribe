@@ -19,6 +19,7 @@ export class WavWriter {
   // size (~4800 samples = 9600 bytes), so a single allocation amortizes
   // across the whole recording instead of one per chunk.
   private convBuf: Buffer = Buffer.allocUnsafe(0);
+  private peakSample = 0;
 
   constructor(opts: WavWriterOpts) {
     this.opts = opts;
@@ -37,11 +38,16 @@ export class WavWriter {
       this.convBuf = Buffer.allocUnsafe(byteLen);
     }
     const buf = this.convBuf;
+    let peak = this.peakSample;
     for (let i = 0; i < samples.length; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]));
+      const raw = samples[i];
+      const s = Math.max(-1, Math.min(1, raw));
       const v = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
       buf.writeInt16LE(v, i * 2);
+      const abs = raw < 0 ? -raw : raw;
+      if (abs > peak) peak = abs;
     }
+    this.peakSample = peak;
     // WriteStream copies its input into its internal buffer, so it's safe to
     // reuse `convBuf` on the next call without waiting for `drain`.
     this.stream.write(buf.subarray(0, byteLen));
@@ -55,12 +61,13 @@ export class WavWriter {
     this.bytesWritten += buf.length;
   }
 
-  async finalize(): Promise<{ filePath: string; bytes: number; durationMs: number }> {
+  async finalize(): Promise<{ filePath: string; bytes: number; durationMs: number; peakSample: number }> {
     if (this.closed) {
       return {
         filePath: this.opts.filePath,
         bytes: this.bytesWritten,
         durationMs: this.estimatedDurationMs(),
+        peakSample: this.peakSample,
       };
     }
     this.closed = true;
@@ -75,6 +82,7 @@ export class WavWriter {
       filePath: this.opts.filePath,
       bytes: this.bytesWritten,
       durationMs: this.estimatedDurationMs(),
+      peakSample: this.peakSample,
     };
   }
 

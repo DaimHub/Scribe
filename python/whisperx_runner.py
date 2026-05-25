@@ -153,9 +153,40 @@ def _get_diarize_pipeline(model_name: str, hf_token: str, device: str):
     return pipe
 
 
+_TORCH_LOAD_PATCHED = False
+
+
+def _patch_torch_load_for_pyannote() -> None:
+    """PyTorch 2.6 flipped `weights_only` default to True, which refuses to
+    unpickle pyannote's checkpoints (they contain `omegaconf.ListConfig` and
+    other non-tensor objects). The "proper" fix — registering safe globals —
+    is fragile because pyannote keeps adding new classes across versions, and
+    lightning_fabric (which pyannote uses) explicitly passes `weights_only=True`
+    so `setdefault` won't help — we have to override.
+
+    Safe here: the only checkpoints loaded are ones the user (and we) trust —
+    pyannote/wespeaker models fetched from HuggingFace by `pyannote.audio`
+    itself, plus the whisper/faster-whisper weights bundled with whisperx.
+    """
+    global _TORCH_LOAD_PATCHED
+    if _TORCH_LOAD_PATCHED:
+        return
+    import torch
+
+    _orig_load = torch.load
+
+    def _patched_load(*args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs["weights_only"] = False
+        return _orig_load(*args, **kwargs)
+
+    torch.load = _patched_load  # type: ignore[assignment]
+    _TORCH_LOAD_PATCHED = True
+
+
 def run(args: argparse.Namespace) -> None:
     emit("loading-runtime", 2)
     import torch
+    _patch_torch_load_for_pyannote()
     import whisperx
 
     device = args.device

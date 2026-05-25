@@ -88,6 +88,25 @@ export async function stopMeeting(meetingId: string): Promise<MeetingResult> {
     sysWriter ? sysWriter.finalize() : Promise.resolve(null),
   ]);
 
+  // Flag silent capture so it doesn't slip past unnoticed (the WAV file still
+  // exists at full duration so the symptom is otherwise invisible until
+  // transcription returns no system-speaker text). -60 dBFS ≈ peak 0.001.
+  if (sysResult && sysResult.peakSample < 0.001 && sysResult.durationMs > 1000) {
+    console.warn(
+      `[recorder] system audio appears silent for meeting ${meetingId} ` +
+        `(peak=${sysResult.peakSample.toExponential(2)}, ` +
+        `dur=${(sysResult.durationMs / 1000).toFixed(1)}s). ` +
+        `Check Screen Recording permission and that output device wasn't muted/redirected.`,
+    );
+  }
+  if (micResult && micResult.peakSample < 0.001 && micResult.durationMs > 1000) {
+    console.warn(
+      `[recorder] mic audio appears silent for meeting ${meetingId} ` +
+        `(peak=${micResult.peakSample.toExponential(2)}, ` +
+        `dur=${(micResult.durationMs / 1000).toFixed(1)}s).`,
+    );
+  }
+
   const endedAtMs = Date.now();
   const result: MeetingResult = {
     meetingId,
