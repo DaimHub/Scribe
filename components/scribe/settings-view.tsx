@@ -12,6 +12,15 @@ import { useScribe } from "@/lib/store";
 import { useT, type TranslateFn } from "@/lib/i18n";
 import type { TranslationKey } from "@/lib/i18n/dictionaries";
 import { ACCENTS, useAccent, type AccentName } from "@/lib/accent";
+import {
+  MONO_FONTS,
+  resolveMonoStack,
+  resolveUiStack,
+  UI_FONTS,
+  useFonts,
+  type MonoFontChoice,
+  type UiFontChoice,
+} from "@/lib/fonts";
 import type {
   AiLanguage,
   CalendarAccountPublic,
@@ -411,6 +420,113 @@ function AccentRow() {
   );
 }
 
+// One font dropdown: presets (each rendered in its own face) plus a
+// "Custom…" item that reveals a free-text family input. Used twice below —
+// once for the interface font, once for monospace.
+function FontPicker({
+  label,
+  description,
+  options,
+  value,
+  custom,
+  customPreview,
+  onSelect,
+  onCustomChange,
+}: {
+  label: string;
+  description: ReactNode;
+  options: readonly {
+    key: string;
+    label: string;
+    i18nKey?: TranslationKey;
+    stack: string;
+  }[];
+  value: string;
+  custom: string;
+  customPreview: string;
+  onSelect: (value: string) => void;
+  onCustomChange: (value: string) => void;
+}) {
+  const t = useT();
+  return (
+    <FieldRow label={label} description={description}>
+      <div className="flex flex-col items-end gap-2">
+        <Select value={value} onValueChange={(v) => onSelect(v ?? value)}>
+          <SelectTrigger size="sm" className="min-w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((opt) => (
+              <SelectItem
+                key={opt.key}
+                value={opt.key}
+                style={{ fontFamily: opt.stack }}
+              >
+                {opt.i18nKey ? t(opt.i18nKey) : opt.label}
+              </SelectItem>
+            ))}
+            <SelectItem value="custom">
+              {t("settings.appearance.font.custom")}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        {value === "custom" && (
+          <Input
+            value={custom}
+            onChange={(e) => onCustomChange(e.target.value)}
+            placeholder={t("settings.appearance.font.customPlaceholder")}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className="h-8 w-52 text-sm"
+            style={{ fontFamily: customPreview }}
+          />
+        )}
+      </div>
+    </FieldRow>
+  );
+}
+
+function FontRow() {
+  const t = useT();
+  const {
+    uiFont,
+    uiFontCustom,
+    monoFont,
+    monoFontCustom,
+    setUiFont,
+    setUiCustom,
+    setMonoFont,
+    setMonoCustom,
+  } = useFonts();
+
+  return (
+    <>
+      <FontPicker
+        label={t("settings.appearance.fontUi")}
+        description={t("settings.appearance.fontUi.desc")}
+        options={UI_FONTS}
+        value={uiFont}
+        custom={uiFontCustom}
+        customPreview={resolveUiStack("custom", uiFontCustom)}
+        onSelect={(v) => setUiFont(v as UiFontChoice)}
+        onCustomChange={setUiCustom}
+      />
+      <Separator />
+      <FontPicker
+        label={t("settings.appearance.fontMono")}
+        description={t("settings.appearance.fontMono.desc")}
+        options={MONO_FONTS}
+        value={monoFont}
+        custom={monoFontCustom}
+        customPreview={resolveMonoStack("custom", monoFontCustom)}
+        onSelect={(v) => setMonoFont(v as MonoFontChoice)}
+        onCustomChange={setMonoCustom}
+      />
+    </>
+  );
+}
+
 function GeneralSection() {
   const sidebarWidth = useScribe((s) => s.sidebarWidth);
   const setSidebarWidth = useScribe((s) => s.setSidebarWidth);
@@ -427,6 +543,8 @@ function GeneralSection() {
         <ThemeRow />
         <Separator />
         <AccentRow />
+        <Separator />
+        <FontRow />
         <Separator />
         <FieldRow
           label={t("settings.appearance.sidebarWidth")}

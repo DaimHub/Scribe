@@ -282,6 +282,16 @@ export const en = {
   "settings.appearance.accent.amber": "Amber",
   "settings.appearance.accent.rose": "Rose",
   "settings.appearance.accent.pink": "Pink",
+  "settings.appearance.fontUi": "Interface font",
+  "settings.appearance.fontUi.desc":
+    "Used for the app's text and headings.",
+  "settings.appearance.fontMono": "Monospace font",
+  "settings.appearance.fontMono.desc":
+    "Used for transcript timestamps and code.",
+  "settings.appearance.font.system": "System",
+  "settings.appearance.font.serif": "Serif",
+  "settings.appearance.font.custom": "Custom…",
+  "settings.appearance.font.customPlaceholder": "Font name (e.g. Menlo)",
   "settings.appearance.sidebarWidth": "Sidebar width",
   "settings.appearance.sidebarWidth.desc":
     "Drag the sidebar edge for finer control, or reset to default.",

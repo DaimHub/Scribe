@@ -289,6 +289,17 @@ export const es: Dictionary = {
   "settings.appearance.accent.amber": "Ámbar",
   "settings.appearance.accent.rose": "Rosa",
   "settings.appearance.accent.pink": "Rosado",
+  "settings.appearance.fontUi": "Fuente de la interfaz",
+  "settings.appearance.fontUi.desc":
+    "Se usa para el texto y los títulos de la aplicación.",
+  "settings.appearance.fontMono": "Fuente monoespaciada",
+  "settings.appearance.fontMono.desc":
+    "Se usa para las marcas de tiempo de la transcripción y el código.",
+  "settings.appearance.font.system": "Sistema",
+  "settings.appearance.font.serif": "Serif",
+  "settings.appearance.font.custom": "Personalizada…",
+  "settings.appearance.font.customPlaceholder":
+    "Nombre de la fuente (p. ej. Menlo)",
   "settings.appearance.sidebarWidth": "Ancho de la barra lateral",
   "settings.appearance.sidebarWidth.desc":
     "Arrastra el borde de la barra lateral para ajuste fino, o restablece al valor por defecto.",

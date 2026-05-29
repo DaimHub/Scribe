@@ -287,6 +287,16 @@ export const fr: Dictionary = {
   "settings.appearance.accent.amber": "Ambre",
   "settings.appearance.accent.rose": "Rose",
   "settings.appearance.accent.pink": "Rose vif",
+  "settings.appearance.fontUi": "Police de l'interface",
+  "settings.appearance.fontUi.desc":
+    "Utilisée pour le texte et les titres de l'application.",
+  "settings.appearance.fontMono": "Police à chasse fixe",
+  "settings.appearance.fontMono.desc":
+    "Utilisée pour les horodatages de transcription et le code.",
+  "settings.appearance.font.system": "Système",
+  "settings.appearance.font.serif": "Serif",
+  "settings.appearance.font.custom": "Personnalisée…",
+  "settings.appearance.font.customPlaceholder": "Nom de la police (ex. Menlo)",
   "settings.appearance.sidebarWidth": "Largeur de la barre latérale",
   "settings.appearance.sidebarWidth.desc":
     "Glissez le bord de la barre latérale pour un ajustement précis, ou revenez à la valeur par défaut.",

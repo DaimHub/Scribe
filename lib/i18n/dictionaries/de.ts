@@ -290,6 +290,16 @@ export const de: Dictionary = {
   "settings.appearance.accent.amber": "Bernstein",
   "settings.appearance.accent.rose": "Rosé",
   "settings.appearance.accent.pink": "Pink",
+  "settings.appearance.fontUi": "Schriftart der Oberfläche",
+  "settings.appearance.fontUi.desc":
+    "Wird für Text und Überschriften der App verwendet.",
+  "settings.appearance.fontMono": "Monospace-Schriftart",
+  "settings.appearance.fontMono.desc":
+    "Wird für Transkript-Zeitstempel und Code verwendet.",
+  "settings.appearance.font.system": "System",
+  "settings.appearance.font.serif": "Serif",
+  "settings.appearance.font.custom": "Benutzerdefiniert…",
+  "settings.appearance.font.customPlaceholder": "Schriftname (z. B. Menlo)",
   "settings.appearance.sidebarWidth": "Breite der Seitenleiste",
   "settings.appearance.sidebarWidth.desc":
     "Ziehe den Rand der Seitenleiste für feine Anpassung oder setze auf Standard zurück.",
