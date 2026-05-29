@@ -5,14 +5,40 @@ type AudioChannel = "mic" | "system";
 export interface CaptureHandle {
   stop(): Promise<void>;
   getLevel(channel: AudioChannel): number;
+  /**
+   * Swap the active microphone mid-recording. Tears down the current mic
+   * pipeline and rebuilds it against `deviceId` (or the system default when
+   * undefined), reusing the same AudioContext so the WAV writer keeps the same
+   * channel + sample rate. Frames briefly pause during the swap.
+   */
+  setMicDevice(deviceId: string | undefined): Promise<void>;
 }
 
 export interface CaptureOptions {
   meetingId: string;
+  /** Preferred microphone deviceId; falls back to the system default. */
+  micDeviceId?: string;
   onError?: (err: Error) => void;
+  /**
+   * System (other-participant) audio is best-effort — it needs Screen Recording
+   * permission on macOS. When it can't be captured the mic keeps recording, so
+   * this is surfaced as a soft, actionable notice rather than a hard error.
+   */
+  onSystemAudioUnavailable?: () => void;
 }
 
-const WORKLET_URL = "/audio-worklets/pcm-tap.worklet.js";
+// Path to the PCM tap AudioWorklet (copied verbatim from public/ to the web root).
+const WORKLET_PATH = "audio-worklets/pcm-tap.worklet.js";
+
+// In the packaged app the renderer loads via file:// from out/index.html, where a
+// leading "/" points at the filesystem root and addModule fails ("Unable to load a
+// worklet's module."). Resolve relative to the document there; over http (dev) the
+// web root works either way.
+function workletUrl(): string {
+  return window.location.protocol === "file:"
+    ? new URL(WORKLET_PATH, document.baseURI).href
+    : `/${WORKLET_PATH}`;
+}
 
 async function buildPipeline(
   ctx: AudioContext,
@@ -65,24 +91,36 @@ async function buildPipeline(
   };
 }
 
+async function startMic(
+  ctx: AudioContext,
+  deviceId: string | undefined,
+  meetingId: string,
+  levels: Record<AudioChannel, number>,
+): Promise<{ teardown: () => void }> {
+  const micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      // `ideal` rather than `exact` so a stale/missing deviceId degrades to the
+      // system default instead of failing capture outright.
+      deviceId: deviceId ? { ideal: deviceId } : undefined,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+    video: false,
+  });
+  return buildPipeline(ctx, micStream, "mic", meetingId, levels);
+}
+
 export async function startCapture(opts: CaptureOptions): Promise<CaptureHandle> {
   const ctx = new AudioContext({ latencyHint: "interactive" });
-  await ctx.audioWorklet.addModule(WORKLET_URL);
+  await ctx.audioWorklet.addModule(workletUrl());
 
   const levels: Record<AudioChannel, number> = { mic: 0, system: 0 };
-  const teardowns: Array<() => void> = [];
+  let micPipeline: { teardown: () => void } | null = null;
+  let sysTeardown: (() => void) | null = null;
 
   try {
-    const micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-      video: false,
-    });
-    const mic = await buildPipeline(ctx, micStream, "mic", opts.meetingId, levels);
-    teardowns.push(mic.teardown);
+    micPipeline = await startMic(ctx, opts.micDeviceId, opts.meetingId, levels);
   } catch (err) {
     opts.onError?.(err instanceof Error ? err : new Error(String(err)));
   }
@@ -95,24 +133,40 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureHandle>
     const audioTracks = sysStream.getAudioTracks();
     if (audioTracks.length === 0) {
       for (const t of sysStream.getTracks()) t.stop();
-      opts.onError?.(new Error("System audio not available — grant Screen Recording permission."));
-    } else {
-      for (const t of sysStream.getVideoTracks()) t.stop();
-      const audioOnly = new MediaStream(audioTracks);
-      const sys = await buildPipeline(ctx, audioOnly, "system", opts.meetingId, levels);
-      teardowns.push(sys.teardown);
+      throw new Error("getDisplayMedia returned no audio track");
     }
+    for (const t of sysStream.getVideoTracks()) t.stop();
+    const audioOnly = new MediaStream(audioTracks);
+    const sys = await buildPipeline(ctx, audioOnly, "system", opts.meetingId, levels);
+    sysTeardown = sys.teardown;
   } catch (err) {
-    opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+    // Best-effort: the mic is already recording, so losing system audio isn't
+    // fatal. The usual cause on macOS is missing Screen Recording permission —
+    // the desktop capturer then finds no sources and getDisplayMedia rejects
+    // with the opaque "Invalid capture constraints". Surface a soft notice
+    // (with an actionable "open settings" affordance) instead of a hard error.
+    console.warn("audio-capture: system audio capture failed:", err);
+    opts.onSystemAudioUnavailable?.();
   }
 
   return {
     async stop() {
-      for (const t of teardowns) t();
+      micPipeline?.teardown();
+      sysTeardown?.();
       await ctx.close();
     },
     getLevel(channel) {
       return levels[channel];
+    },
+    async setMicDevice(deviceId) {
+      micPipeline?.teardown();
+      micPipeline = null;
+      levels.mic = 0;
+      try {
+        micPipeline = await startMic(ctx, deviceId, opts.meetingId, levels);
+      } catch (err) {
+        opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
     },
   };
 }

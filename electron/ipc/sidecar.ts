@@ -7,9 +7,15 @@ import {
 } from "../services/python-sidecar.js";
 import {
   clearHfToken,
+  getAiLanguage,
+  getDisplayLanguage,
   getHfToken,
   hasHfToken,
+  setAiLanguage,
+  setDisplayLanguage,
   setHfToken,
+  type AiLanguage,
+  type DisplayLanguage,
 } from "../services/settings.js";
 
 function emitInstall(p: InstallProgress) {
@@ -45,6 +51,20 @@ export function registerSidecarIpc(): void {
   });
   ipcMain.handle("settings:clearHfToken", async () => {
     await clearHfToken();
+    return { ok: true };
+  });
+
+  ipcMain.handle("settings:getDisplayLanguage", () => getDisplayLanguage());
+  ipcMain.handle(
+    "settings:setDisplayLanguage",
+    async (_e, lang: DisplayLanguage) => {
+      await setDisplayLanguage(lang);
+      return { ok: true };
+    },
+  );
+  ipcMain.handle("settings:getAiLanguage", () => getAiLanguage());
+  ipcMain.handle("settings:setAiLanguage", async (_e, lang: AiLanguage) => {
+    await setAiLanguage(lang);
     return { ok: true };
   });
 }

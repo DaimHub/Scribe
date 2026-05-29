@@ -49,18 +49,41 @@ async function handleGenerate(payload) {
 
   PROGRESS("generating", 55, undefined, badge);
   const grammar = new LlamaJsonSchemaGrammar(llama, schema);
+  const startedAt = Date.now();
   const raw = await session.prompt(prompt, {
     grammar,
     maxTokens,
     temperature,
   });
+  const durationMs = Date.now() - startedAt;
 
   PROGRESS("writing", 90, undefined, badge);
+
+  // Best-effort token counts via the model's own tokenizer. The numbers are
+  // close enough for budget reporting (the actual generation may pick
+  // slightly different tokens at the margin, but the count matches what
+  // the model "sees"). Wrapped in try/catch because tokenize() can throw on
+  // models with non-standard tokenizers we haven't encountered yet — losing
+  // the counts is preferable to losing the whole generation.
+  let inputTokens;
+  let outputTokens;
+  try {
+    inputTokens = model.tokenize(prompt).length;
+    outputTokens = model.tokenize(raw).length;
+  } catch {
+    /* leave undefined */
+  }
 
   // Send result BEFORE dispose. If dispose triggers the segfault, the parent
   // has already received the data and can persist it.
   if (process.send) {
-    process.send({ type: "result", raw });
+    process.send({
+      type: "result",
+      raw,
+      inputTokens,
+      outputTokens,
+      durationMs,
+    });
   }
 
   try {

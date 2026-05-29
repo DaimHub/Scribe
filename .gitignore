@@ -24,6 +24,10 @@
 /models/
 /python-venv/
 
+# python
+__pycache__/
+*.pyc
+
 # misc
 .DS_Store
 *.pem

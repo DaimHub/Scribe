@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { CalendarEventRow } from "@/lib/scribe-global";
 import { useScribe } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -63,6 +64,7 @@ function EventDetail({
 }) {
   const selectMeeting = useScribe((s) => s.selectMeeting);
   const setActiveSection = useScribe((s) => s.setActiveSection);
+  const t = useT();
 
   const attendees = parseAttendees(event.attendees_json);
   const isLinked = !!event.meeting_id;
@@ -83,7 +85,7 @@ function EventDetail({
               )}
             >
               <HugeiconsIcon icon={Edit02Icon} className="size-2.5" />
-              Recorded
+              {t("status.recorded")}
             </Badge>
           )}
         </div>
@@ -126,7 +128,7 @@ function EventDetail({
               ))}
               {attendees.length > 6 && (
                 <span className="self-center text-[11px] text-muted-foreground">
-                  +{attendees.length - 6} more
+                  {t("common.plusMore", { count: attendees.length - 6 })}
                 </span>
               )}
             </div>
@@ -153,11 +155,11 @@ function EventDetail({
             }}
           >
             <HugeiconsIcon icon={Edit02Icon} className="size-3.5" />
-            Open notes
+            {t("eventPopover.openNotes")}
           </Button>
         ) : (
           <span className="flex-1 text-[11px] text-muted-foreground">
-            No Scribe recording linked yet.
+            {t("eventPopover.noRecording")}
           </span>
         )}
         {event.hangout_link && (
@@ -175,7 +177,7 @@ function EventDetail({
             }
           >
             <HugeiconsIcon icon={LinkSquare01Icon} className="size-3" />
-            Join
+            {t("event.join")}
           </Button>
         )}
       </footer>

@@ -6,8 +6,11 @@ import {
   listSpeakers,
   listVoiceLibrary,
   listVoiceLibraryWithStats,
+  markLibraryEntryAsMe,
   renameVoiceLibraryEntry,
+  setPersonEmail,
   setSpeakerMatch,
+  updatePersonEmail,
   type SpeakerRow,
 } from "../services/db.js";
 import {
@@ -15,6 +18,7 @@ import {
   findBestMatch,
   mergeIntoLibrary,
 } from "../services/voice-match.js";
+import { broadcastVoiceLibraryChanged } from "../services/broadcast.js";
 
 export interface PendingReviewSpeaker {
   meeting_id: string;
@@ -22,6 +26,13 @@ export interface PendingReviewSpeaker {
   display_name: string;
   sample_clip_path: string | null;
   match_confidence: number | null;
+  /** Library person this speaker is linked to, or null. Lets the renderer
+   *  seed the avatar color by stable identity (so it matches the People page)
+   *  and show the "you" badge. */
+  voice_library_id: string | null;
+  /** Email of the library person this speaker is linked to (set in People),
+   *  or null when the speaker isn't linked or that person has no email. */
+  email: string | null;
   candidates: Array<{
     library_id: string;
     display_name: string;
@@ -40,12 +51,33 @@ export function registerVoiceIpc(): void {
     "voice:renameLibraryEntry",
     (_e, id: string, displayName: string) => {
       renameVoiceLibraryEntry(id, displayName);
+      broadcastVoiceLibraryChanged();
       return { ok: true };
     },
   );
 
   ipcMain.handle("voice:deleteLibraryEntry", (_e, id: string) => {
     deleteVoiceLibraryEntry(id);
+    broadcastVoiceLibraryChanged();
+    return { ok: true };
+  });
+
+  // Manual email edit from the People view — overwrites (or clears when empty),
+  // unlike the backfill-only setPersonEmail used by the auto-tag path.
+  ipcMain.handle(
+    "voice:setLibraryEmail",
+    (_e, id: string, email: string | null) => {
+      updatePersonEmail(id, email);
+      broadcastVoiceLibraryChanged();
+      return { ok: true };
+    },
+  );
+
+  // Mark a person as "you" (or pass null to clear). Manual override from the
+  // People view; always wins over the calendar-email auto-detection.
+  ipcMain.handle("voice:setMe", (_e, id: string | null) => {
+    markLibraryEntryAsMe(id);
+    broadcastVoiceLibraryChanged();
     return { ok: true };
   });
 
@@ -53,11 +85,20 @@ export function registerVoiceIpc(): void {
 
   ipcMain.handle(
     "voice:pendingReview",
-    (_e, meetingId: string): PendingReviewSpeaker[] => {
+    (
+      _e,
+      meetingId: string,
+      includeReviewed = false,
+    ): PendingReviewSpeaker[] => {
       const speakers = listSpeakers(meetingId);
+      // Resolve each linked speaker's person email once up front.
+      const emailByLib = new Map<string, string>();
+      for (const l of listVoiceLibrary()) {
+        if (l.email) emailByLib.set(l.id, l.email);
+      }
       return speakers
-        .filter((s) => s.needs_review === 1)
-        .map((s) => toPendingReview(s));
+        .filter((s) => includeReviewed || s.needs_review === 1)
+        .map((s) => toPendingReview(s, emailByLib));
     },
   );
 
@@ -75,6 +116,7 @@ export function registerVoiceIpc(): void {
       speakerId: string,
       libraryId: string,
       displayName: string,
+      email?: string | null,
     ) => {
       const sp = getSpeakerEmbedding(meetingId, speakerId);
       setSpeakerMatch({
@@ -88,35 +130,42 @@ export function registerVoiceIpc(): void {
       if (sp?.embedding) {
         mergeIntoLibrary({ libraryId, newEmbedding: sp.embedding });
       }
+      // When assigning from a calendar invitee, stamp their email onto the
+      // person so future invitees match by email (no-op if already set).
+      if (email) setPersonEmail(libraryId, email);
+      // Library stats (n_meetings, last_heard_ms) change even when no row
+      // is created — the People view needs to refresh either way.
+      broadcastVoiceLibraryChanged();
       return { ok: true };
     },
   );
 
   /**
    * The user confirmed this is a brand-new person. Creates a library entry
-   * seeded with this speaker's embedding and links the meeting row to it.
+   * (always — even when no embedding is available) so the manual assignment
+   * persists across re-diarize runs and shows up in the People tab. Without
+   * an embedding the entry can't auto-match against future speakers, but
+   * the next diarize pass that DOES produce an embedding can merge it via
+   * voice:assignToLibrary when the user picks this entry again.
    */
   ipcMain.handle(
     "voice:createFromSpeaker",
-    (_e, meetingId: string, speakerId: string, displayName: string) => {
+    (
+      _e,
+      meetingId: string,
+      speakerId: string,
+      displayName: string,
+      email?: string | null,
+    ) => {
       const sp = getSpeakerEmbedding(meetingId, speakerId);
-      if (!sp || !sp.embedding) {
-        // No embedding to seed with — still update the displayed name and
-        // clear the review flag so the UI stops nagging.
-        setSpeakerMatch({
-          meetingId,
-          speakerId,
-          voiceLibraryId: null,
-          matchConfidence: null,
-          needsReview: false,
-          displayName,
-        });
-        return { ok: true, libraryId: null };
-      }
+      // No embedding (short interjection, or tagged from the invitee list
+      // before the voice was heard) → the person is created name-only and
+      // becomes voice-matchable once a real recording is folded in later.
       const entry = addToLibrary({
         displayName,
-        embedding: sp.embedding,
-        sampleClipPath: sp.sampleClipPath,
+        embedding: sp?.embedding ?? null,
+        sampleClipPath: sp?.sampleClipPath ?? null,
+        email: email ?? null,
       });
       setSpeakerMatch({
         meetingId,
@@ -126,6 +175,7 @@ export function registerVoiceIpc(): void {
         needsReview: false,
         displayName,
       });
+      broadcastVoiceLibraryChanged();
       return { ok: true, libraryId: entry.id };
     },
   );
@@ -156,7 +206,10 @@ export function registerVoiceIpc(): void {
   );
 }
 
-function toPendingReview(s: SpeakerRow): PendingReviewSpeaker {
+function toPendingReview(
+  s: SpeakerRow,
+  emailByLib: Map<string, string>,
+): PendingReviewSpeaker {
   let candidates: PendingReviewSpeaker["candidates"] = [];
   const embRow = getSpeakerEmbedding(s.meeting_id, s.speaker_id);
   if (embRow?.embedding) {
@@ -173,6 +226,10 @@ function toPendingReview(s: SpeakerRow): PendingReviewSpeaker {
     display_name: s.display_name,
     sample_clip_path: s.sample_clip_path,
     match_confidence: s.match_confidence,
+    voice_library_id: s.voice_library_id,
+    email: s.voice_library_id
+      ? (emailByLib.get(s.voice_library_id) ?? null)
+      : null,
     candidates,
   };
 }

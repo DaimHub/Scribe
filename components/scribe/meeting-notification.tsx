@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { NotificationPayload } from "@/lib/scribe-global";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button";
  * action runs.
  */
 export function MeetingNotification() {
+  const t = useT();
   const [payload, setPayload] = useState<NotificationPayload | null>(null);
   const [now, setNow] = useState(Date.now());
 
@@ -44,11 +46,11 @@ export function MeetingNotification() {
   const subline = useMemo(() => {
     if (!payload) return "";
     const diffMin = Math.round((payload.event.start_at_ms - now) / 60_000);
-    if (diffMin > 1) return `Starts in ${diffMin} min`;
-    if (diffMin === 1) return "Starts in 1 min";
-    if (diffMin === 0) return "Starting now";
-    return `Started ${Math.abs(diffMin)} min ago`;
-  }, [payload, now]);
+    if (diffMin > 1) return t("notification.startsInMin", { count: diffMin });
+    if (diffMin === 1) return t("notification.startsInOne");
+    if (diffMin === 0) return t("notification.startingNow");
+    return t("notification.startedAgo", { count: Math.abs(diffMin) });
+  }, [payload, now, t]);
 
   if (!payload) {
     // Window opens with payload pushed via floating:notification — show
@@ -76,7 +78,7 @@ export function MeetingNotification() {
         <Button
           variant="ghost"
           size="icon-xs"
-          aria-label="Dismiss"
+          aria-label={t("common.dismiss")}
           onClick={() => window.scribe.floating.dismissNotification()}
           className="-mr-1 -mt-1 [-webkit-app-region:no-drag]"
         >
@@ -96,14 +98,14 @@ export function MeetingNotification() {
           disabled={!hasMeetingUrl}
           className="flex-1 rounded-full text-xs"
         >
-          Join meeting
+          {t("notification.join")}
         </Button>
         <Button
           size="sm"
           onClick={() => window.scribe.floating.startScribeForEvent(event.id)}
           className="flex-1 rounded-full text-xs"
         >
-          Start Scribe
+          {t("recording.start")}
         </Button>
       </div>
     </div>

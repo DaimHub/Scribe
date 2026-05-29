@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TagRow } from "@/lib/scribe-global";
 import { useScribe } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -22,6 +23,7 @@ export function TagChips({ meetingId }: { meetingId: string }) {
   const allTags = useScribe((s) => s.allTags);
   const attach = useScribe((s) => s.attachTag);
   const detach = useScribe((s) => s.detachTag);
+  const t = useT();
 
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -46,20 +48,20 @@ export function TagChips({ meetingId }: { meetingId: string }) {
 
   const suggestions = allTags
     .filter(
-      (t) =>
+      (tag) =>
         draft.trim().length > 0 &&
-        t.name.toLowerCase().includes(draft.trim().toLowerCase()) &&
-        !tags.some((u) => u.id === t.id),
+        tag.name.toLowerCase().includes(draft.trim().toLowerCase()) &&
+        !tags.some((u) => u.id === tag.id),
     )
     .slice(0, 6);
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {tags.map((t) => (
+      {tags.map((tag) => (
         <TagPill
-          key={t.id}
-          tag={t}
-          onRemove={() => void detach(meetingId, t.id)}
+          key={tag.id}
+          tag={tag}
+          onRemove={() => void detach(meetingId, tag.id)}
         />
       ))}
 
@@ -72,7 +74,7 @@ export function TagChips({ meetingId }: { meetingId: string }) {
               className="inline-flex h-6 items-center gap-1 rounded-full border border-dashed px-2 text-[11px] text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
             >
               <HugeiconsIcon icon={PlusSignIcon} className="size-2.5" />
-              Add tag
+              {t("header.addTag")}
             </button>
           )}
         />
@@ -88,7 +90,7 @@ export function TagChips({ meetingId }: { meetingId: string }) {
                 setOpen(false);
               }
             }}
-            placeholder="tag name…"
+            placeholder={t("tagChips.placeholder")}
             className="h-7 w-full rounded-md bg-transparent px-2 text-[12px] outline-none focus:bg-accent/40"
           />
           {suggestions.length > 0 && (
@@ -125,6 +127,7 @@ export function TagPill({
   onRemove?: () => void;
   size?: "sm" | "md";
 }) {
+  const t = useT();
   const { pillStyle, dotStyle } = useMemo(() => {
     const c = tag.color ?? "#888";
     return {
@@ -144,7 +147,7 @@ export function TagPill({
         size === "sm" ? "h-5 text-[10px]" : "h-6 text-[11px]",
       )}
       style={pillStyle}
-      title={tag.auto ? "Auto-tag from notes" : undefined}
+      title={tag.auto ? t("tagChips.autoFromNotes") : undefined}
     >
       {tag.auto ? (
         <HugeiconsIcon icon={SparklesIcon} className="size-2.5 opacity-80" />
@@ -159,8 +162,8 @@ export function TagPill({
         <button
           type="button"
           onClick={onRemove}
-          aria-label={`Remove tag ${tag.name}`}
-          className="inline-flex size-3.5 items-center justify-center rounded-full text-current opacity-0 transition-opacity hover:bg-current/15 group-hover:opacity-100"
+          aria-label={t("tagChips.remove", { name: tag.name })}
+          className="inline-flex size-3.5 items-center justify-center rounded-full text-current opacity-0 transition-opacity hover:bg-current/15 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/40"
         >
           <HugeiconsIcon icon={Cancel01Icon} className="size-2.5" />
         </button>

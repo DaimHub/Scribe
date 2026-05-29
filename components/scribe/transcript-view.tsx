@@ -1,6 +1,13 @@
 "use client";
 
-import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MeetingDetail } from "@/lib/scribe-global";
 import { SpeakerChip } from "./speaker-chip";
@@ -15,12 +22,14 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SparklesIcon } from "@hugeicons/core-free-icons";
+import { useT } from "@/lib/i18n";
 
 export function TranscriptView({ detail }: { detail: MeetingDetail }) {
+  const t = useT();
   const labelFor = useMemo(() => {
     const map = new Map(detail.speakers.map((s) => [s.speaker_id, s.display_name]));
-    return (id: string | null) => (id ? (map.get(id) ?? id) : "Speaker");
-  }, [detail.speakers]);
+    return (id: string | null) => (id ? (map.get(id) ?? id) : t("transcript.speaker"));
+  }, [detail.speakers, t]);
 
   const playback = useSyncExternalStore(subscribePlayback, getPlayback, getPlayback);
   const activeIdx =
@@ -70,6 +79,14 @@ export function TranscriptView({ detail }: { detail: MeetingDetail }) {
     measureElement: (el) => el.getBoundingClientRect().height,
   });
 
+  // Follow playback: keep the active segment in view. `align: "auto"` only
+  // scrolls when it's off-screen, so a user reading ahead isn't yanked back
+  // on every segment boundary.
+  useEffect(() => {
+    if (activeIdx < 0 || !scrollEl) return;
+    virtualizer.scrollToIndex(activeIdx, { align: "auto" });
+  }, [activeIdx, scrollEl, virtualizer]);
+
   if (detail.transcript.length === 0) {
     return <TranscriptEmptyOrLoading meetingId={detail.meeting.id} />;
   }
@@ -107,7 +124,7 @@ export function TranscriptView({ detail }: { detail: MeetingDetail }) {
                   variant="link"
                   onClick={() => seekTo(meetingId, seg.start_ms / 1000)}
                   className="h-auto w-12 shrink-0 justify-end p-0 pt-0.5 font-mono text-[11px] font-normal tabular-nums text-muted-foreground hover:text-primary hover:no-underline"
-                  title="Jump to this moment"
+                  title={t("transcript.jumpTo")}
                 >
                   {formatDuration(seg.start_ms)}
                 </Button>
@@ -134,8 +151,9 @@ export function TranscriptView({ detail }: { detail: MeetingDetail }) {
 }
 
 function TranscriptEmptyOrLoading({ meetingId }: { meetingId: string }) {
+  const t = useT();
   const processing = useScribe((s) => s.processing);
-  const processMeeting = useScribe((s) => s.processMeeting);
+  const openSpeakerPrompt = useScribe((s) => s.openSpeakerPrompt);
   const isBusy =
     processing.kind === "processing" && processing.meetingId === meetingId;
   const isTranscribing =
@@ -162,20 +180,34 @@ function TranscriptEmptyOrLoading({ meetingId }: { meetingId: string }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center">
       <div className="text-sm font-medium text-muted-foreground">
-        No transcript yet
+        {t("transcript.empty.title")}
       </div>
       <div className="max-w-sm text-xs text-muted-foreground">
-        Process the recording to transcribe and generate notes.
+        {t("transcript.empty.body")}
       </div>
-      <Button
-        size="sm"
-        className="mt-2 gap-1.5"
-        onClick={() => void processMeeting(meetingId)}
-        disabled={isBusy}
-      >
-        <HugeiconsIcon icon={SparklesIcon} className="size-3.5" />
-        {isBusy ? "Processing…" : "Process meeting"}
-      </Button>
+      <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+        <Button
+          size="sm"
+          className="gap-1.5"
+          onClick={() =>
+            // Funnel through the store prompt so the user always gets the
+            // chance to set num_speakers + template before the pipeline runs.
+            openSpeakerPrompt(meetingId, { kind: "process" })
+          }
+          disabled={isBusy}
+        >
+          <HugeiconsIcon icon={SparklesIcon} className="size-3.5" />
+          {isBusy ? t("summary.processing") : t("header.process")}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => openSpeakerPrompt(meetingId, { kind: "transcribe" })}
+          disabled={isBusy}
+        >
+          {t("header.transcribeOnly")}
+        </Button>
+      </div>
     </div>
   );
 }

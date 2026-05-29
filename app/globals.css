@@ -7,6 +7,7 @@
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: var(--font-sans);
+    --font-brand: var(--font-brand);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -48,13 +49,18 @@
 }
 
 :root {
+    /* Single source of truth for the brand accent. The chips in
+       Settings → Appearance update this at runtime; everything tinted by
+       --primary / --sidebar-primary follows. */
+    --scribe-accent-hue: 277.023;
+
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
     --card-foreground: oklch(0.145 0 0);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.457 0.24 277.023);
+    --primary: oklch(0.457 0.24 var(--scribe-accent-hue));
     --primary-foreground: oklch(0.962 0.018 272.314);
     --secondary: oklch(0.967 0.001 286.375);
     --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -75,7 +81,7 @@
     --radius: 0.625rem;
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.511 0.262 276.966);
+    --sidebar-primary: oklch(0.511 0.262 var(--scribe-accent-hue));
     --sidebar-primary-foreground: oklch(0.962 0.018 272.314);
     --sidebar-accent: oklch(0.97 0 0);
     --sidebar-accent-foreground: oklch(0.205 0 0);
@@ -90,7 +96,7 @@
     --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.398 0.195 277.366);
+    --primary: oklch(0.55 0.22 var(--scribe-accent-hue));
     --primary-foreground: oklch(0.962 0.018 272.314);
     --secondary: oklch(0.274 0.006 286.033);
     --secondary-foreground: oklch(0.985 0 0);
@@ -109,7 +115,7 @@
     --chart-5: oklch(0.473 0.137 46.201);
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.585 0.233 277.117);
+    --sidebar-primary: oklch(0.585 0.233 var(--scribe-accent-hue));
     --sidebar-primary-foreground: oklch(0.962 0.018 272.314);
     --sidebar-accent: oklch(0.269 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
@@ -143,5 +149,16 @@
 body[data-sidebar-resizing] [data-slot="sidebar-gap"],
 body[data-sidebar-resizing] [data-slot="sidebar-container"] {
   transition: none !important;
+}
+
+/* Find-in-page counter. Renders the digits via CSS-generated content so the
+   find bar's own match count never feeds back into the searched DOM text —
+   without this trick, searching for "1" or "/" makes the count grow on
+   every keystroke. */
+.scribe-find-counter::after {
+  content: attr(data-current) "/" attr(data-total);
+}
+.scribe-find-counter[data-empty="true"]::after {
+  content: attr(data-empty-label);
 }
 

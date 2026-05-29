@@ -6,16 +6,17 @@ import { access, mkdir } from "node:fs/promises";
 import { constants, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import ffmpegStatic from "ffmpeg-static";
+import { FFMPEG_PATH } from "./audio-mix.js";
 
 const exec = promisify(execFile);
 
 /** Build an env where the bundled ffmpeg binary is on PATH.
  *  WhisperX's audio loader shells out to `ffmpeg` (not the Python library). */
 function envWithFfmpeg(): NodeJS.ProcessEnv {
-  const ffmpegPath = ffmpegStatic as unknown as string | null;
-  if (!ffmpegPath) return { ...process.env };
-  const dir = path.dirname(ffmpegPath);
+  // "ffmpeg" (no separator) is the no-bundled-binary fallback — leave PATH be
+  // and let WhisperX find a system ffmpeg.
+  if (!FFMPEG_PATH.includes(path.sep)) return { ...process.env };
+  const dir = path.dirname(FFMPEG_PATH);
   const sep = process.platform === "win32" ? ";" : ":";
   const existing = process.env.PATH ?? "";
   return { ...process.env, PATH: existing ? `${dir}${sep}${existing}` : dir };
@@ -119,7 +120,17 @@ export async function ensureVenv(
 
   onProgress?.({ stage: "install-whisperx" });
   await runPip(
-    ["install", "whisperx", "faster-whisper", "pyannote.audio", "transformers", "ctranslate2"],
+    ["install", "whisperx", "faster-whisper", "transformers", "ctranslate2"],
+    onProgress,
+  );
+
+  // pyannote.audio 4.x must win even though whisperx pins `<4.0` — its
+  // metadata constraint is stale, but it only calls Pipeline.from_pretrained,
+  // which works across the version bump. Install explicitly after whisperx
+  // so pip's resolver doesn't fall back to 3.x.
+  onProgress?.({ stage: "install-pyannote" });
+  await runPip(
+    ["install", "--upgrade", "pyannote.audio>=4.0,<5"],
     onProgress,
   );
 
@@ -195,6 +206,8 @@ export interface RunOpts {
   language?: string;
   diarize?: boolean;
   hfToken?: string;
+  /** Exact speaker count — overrides min/max when set. */
+  numSpeakers?: number;
   minSpeakers?: number;
   maxSpeakers?: number;
   noAlign?: boolean;
@@ -234,13 +247,29 @@ export interface RunResult {
   speakers?: SpeakerEmbedding[];
 }
 
+export interface DiarizeOnlyOpts {
+  wav: string;
+  hfToken: string;
+  /** Exact speaker count (overrides min/max range when set). */
+  numSpeakers?: number;
+  minSpeakers?: number;
+  maxSpeakers?: number;
+  diarizeModel?: string;
+  segments: Array<{ idx: number; start_ms: number; end_ms: number }>;
+}
+
+export interface DiarizeOnlyResult {
+  assignments: Array<{ segment_idx: number; speaker: string }>;
+  speakers: SpeakerEmbedding[];
+}
+
 // --- Persistent daemon ------------------------------------------------------
 // Spawned lazily on the first runWhisperX call, kept alive between
 // transcriptions so the Python interpreter + torch/whisperx imports + model
 // weights stay in memory (saves 10–40 s per subsequent run).
 
 interface PendingRequest {
-  resolve: (result: RunResult) => void;
+  resolve: (result: unknown) => void;
   reject: (err: Error) => void;
   onProgress?: (e: ProgressEvent) => void;
 }
@@ -353,7 +382,7 @@ function handleStdoutLine(handle: SidecarHandle, line: string) {
   if (!req) return;
   handle.pending.delete(e.id);
   if (e.event === "result" && e.ok) {
-    req.resolve(e.result as RunResult);
+    req.resolve(e.result);
   } else if (e.event === "error") {
     req.reject(new Error(e.message ?? "WhisperX returned error event"));
   } else {
@@ -435,6 +464,48 @@ export async function runWhisperX(
   opts: RunOpts,
   onProgress?: (e: ProgressEvent) => void,
 ): Promise<RunResult> {
+  return invokeSidecar<RunResult>(
+    "run",
+    {
+      wav: opts.wav,
+      model: opts.model ?? "large-v3-turbo",
+      language: opts.language ?? "auto",
+      no_align: !!opts.noAlign,
+      diarize: !!(opts.diarize && opts.hfToken),
+      hf_token: opts.hfToken,
+      num_speakers: opts.numSpeakers ?? 0,
+      min_speakers: opts.minSpeakers ?? 0,
+      max_speakers: opts.maxSpeakers ?? 0,
+      extract_embeddings: !!opts.extractEmbeddings,
+    },
+    onProgress,
+  );
+}
+
+export async function runDiarizeOnly(
+  opts: DiarizeOnlyOpts,
+  onProgress?: (e: ProgressEvent) => void,
+): Promise<DiarizeOnlyResult> {
+  return invokeSidecar<DiarizeOnlyResult>(
+    "diarize-only",
+    {
+      wav: opts.wav,
+      hf_token: opts.hfToken,
+      num_speakers: opts.numSpeakers ?? 0,
+      min_speakers: opts.minSpeakers ?? 0,
+      max_speakers: opts.maxSpeakers ?? 0,
+      diarize_model: opts.diarizeModel,
+      segments: opts.segments,
+    },
+    onProgress,
+  );
+}
+
+async function invokeSidecar<T>(
+  type: string,
+  payload: Record<string, unknown>,
+  onProgress?: (e: ProgressEvent) => void,
+): Promise<T> {
   if (!sidecar) sidecar = startSidecar();
   const handle = sidecar;
   if (handle.idleTimer) {
@@ -444,23 +515,13 @@ export async function runWhisperX(
   await handle.ready;
   const id = randomUUID();
 
-  return new Promise<RunResult>((resolve, reject) => {
-    handle.pending.set(id, { resolve, reject, onProgress });
-    const command = {
-      type: "run",
-      id,
-      payload: {
-        wav: opts.wav,
-        model: opts.model ?? "large-v3-turbo",
-        language: opts.language ?? "auto",
-        no_align: !!opts.noAlign,
-        diarize: !!(opts.diarize && opts.hfToken),
-        hf_token: opts.hfToken,
-        min_speakers: opts.minSpeakers ?? 0,
-        max_speakers: opts.maxSpeakers ?? 0,
-        extract_embeddings: !!opts.extractEmbeddings,
-      },
-    };
+  return new Promise<T>((resolve, reject) => {
+    handle.pending.set(id, {
+      resolve: (result) => resolve(result as T),
+      reject,
+      onProgress,
+    });
+    const command = { type, id, payload };
     try {
       handle.child.stdin.write(JSON.stringify(command) + "\n");
     } catch (err) {

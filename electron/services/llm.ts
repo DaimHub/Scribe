@@ -1,141 +1,38 @@
-import { app, BrowserWindow } from "electron";
-import path from "node:path";
-import { access, mkdir, stat } from "node:fs/promises";
-import { constants } from "node:fs";
-import { createWriteStream } from "node:fs";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { fork, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { BrowserWindow } from "electron";
 import {
   attachTagToMeeting,
   clearAutoTagsForMeeting,
   deleteTasksForMeeting,
   getMeeting,
+  getMeLibraryId,
   insertTask,
   listAllTags,
   listSpeakers,
   listTranscript,
+  setBullets,
   setStatus,
   setSummary,
   transaction,
   updatePipeline,
-  upsertSpeaker,
+  type NotesUsage,
 } from "./db.js";
+import {
+  getAiLanguage,
+  getKbFilesystemPath,
+  type AiLanguage,
+} from "./settings.js";
+import { getActiveProvider } from "./llm-providers/index.js";
+import { FilesystemMcpClient } from "./mcp-client.js";
+import { resolveTemplate } from "./notes-templates.js";
 
-// LLM no longer runs in-process. See electron/llm-worker.cjs for the why —
-// short version: node-llama-cpp's Metal backend has a reproducible segfault
-// on Apple Silicon during sequence init that takes down the whole Electron
-// process, including any in-flight recording. Forking into a child contains
-// the blast radius.
-let activeWorker: ChildProcess | null = null;
+export { disposeCachedLlmModel } from "./llm-providers/index.js";
+export type { LlmModel } from "./llm-providers/index.js";
 
-export async function disposeCachedLlmModel(): Promise<void> {
-  // Kept for API compatibility with main.ts before-quit hook.
-  if (activeWorker && !activeWorker.killed) {
-    activeWorker.kill("SIGTERM");
-    activeWorker = null;
-  }
-}
-
-function locateWorkerScript(): string {
-  // dist-electron/services/llm.js → ../llm-worker.cjs
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, "..", "llm-worker.cjs");
-}
-
-interface WorkerResult {
-  raw: string;
-}
-
-function runLlmWorker(
-  payload: {
-    modelPath: string;
-    prompt: string;
-    schema: unknown;
-    maxTokens: number;
-    temperature: number;
-    contextSize: number;
-    badge: string;
-  },
-  onProgress: (stage: string, pct: number, note?: string, model?: string) => void,
-): Promise<WorkerResult> {
-  return new Promise((resolve, reject) => {
-    const child = fork(locateWorkerScript(), [], {
-      // Inherit stderr so node-llama-cpp's load warnings appear in dev logs.
-      stdio: ["ignore", "ignore", "inherit", "ipc"],
-      env: { ...process.env, NODE_NO_WARNINGS: "1" },
-    });
-    activeWorker = child;
-
-    let settled = false;
-    const finishOk = (r: WorkerResult) => {
-      if (settled) return;
-      settled = true;
-      resolve(r);
-    };
-    const finishErr = (e: Error) => {
-      if (settled) return;
-      settled = true;
-      reject(e);
-    };
-
-    child.on("message", (msg: { type: string; [k: string]: unknown }) => {
-      if (!msg || typeof msg !== "object") return;
-      if (msg.type === "progress") {
-        onProgress(
-          (msg.stage as string) ?? "",
-          (msg.pct as number) ?? 0,
-          msg.note as string | undefined,
-          msg.model as string | undefined,
-        );
-      } else if (msg.type === "result" && typeof msg.raw === "string") {
-        finishOk({ raw: msg.raw });
-      } else if (msg.type === "error") {
-        finishErr(new Error((msg.message as string) ?? "LLM worker error"));
-      }
-    });
-
-    child.on("error", (err) => finishErr(err));
-    child.on("exit", (code, signal) => {
-      if (activeWorker === child) activeWorker = null;
-      if (settled) return;
-      finishErr(
-        new Error(
-          `LLM worker exited unexpectedly (code=${code}, signal=${signal}). ` +
-            `This is a known Metal-backend segfault on Apple Silicon; ` +
-            `the recording and transcript are unaffected.`,
-        ),
-      );
-    });
-
-    child.send({ type: "generate", payload });
-  });
-}
-
-export type LlmModel =
-  | "gemma-3-4b"
-  | "gemma-3-12b"
-  | "llama-3.2-3b"
-  | "qwen-2.5-7b";
-
-const MODEL_FILES: Record<LlmModel, { url: string; file: string }> = {
-  "gemma-3-4b": {
-    url: "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
-    file: "google_gemma-3-4b-it-Q4_K_M.gguf",
-  },
-  "gemma-3-12b": {
-    url: "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/main/google_gemma-3-12b-it-Q4_K_M.gguf",
-    file: "google_gemma-3-12b-it-Q4_K_M.gguf",
-  },
-  "llama-3.2-3b": {
-    url: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-    file: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-  },
-  "qwen-2.5-7b": {
-    url: "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-    file: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-  },
+const LANGUAGE_LABEL: Record<Exclude<AiLanguage, "auto">, string> = {
+  en: "English",
+  fr: "French",
+  es: "Spanish",
+  de: "German",
 };
 
 interface NotesOutput {
@@ -143,21 +40,9 @@ interface NotesOutput {
   full_summary: string;
   sections: Array<{ title: string; content: string }>;
   decisions: string[];
+  key_points: string[];
   action_items: Array<{ assignee: string; text: string }>;
   tags: string[];
-}
-
-function modelsDir(): string {
-  return path.join(app.getPath("userData"), "models");
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await access(p, constants.R_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function emit(
@@ -172,91 +57,25 @@ function emit(
   }
 }
 
-function llmBadge(model: LlmModel): string {
-  // e.g. gemma-3-4b → "gemma · 3-4b", llama-3.2-3b → "llama · 3.2-3b"
-  const m = /^([a-z]+)-(.+)$/.exec(model);
-  return m ? `${m[1]} · ${m[2]}` : model;
-}
+// Stable, cacheable system prefix. The schema spec and example are
+// identical across every meeting; on providers that support prompt caching
+// (Anthropic), marking this block ephemeral cuts repeat-meeting cost to
+// roughly 10% of the system tokens. The per-meeting variability (persona,
+// language, transcript, assignee whitelist, tags) lives in the user block.
+const SYSTEM_PROMPT_FIXED = `You are an assistant that produces structured meeting notes from transcripts.
 
-async function ensureModel(
-  model: LlmModel,
-  onProgress?: (downloaded: number, total: number | null) => void,
-): Promise<string> {
-  await mkdir(modelsDir(), { recursive: true });
-  const { url, file } = MODEL_FILES[model];
-  const dest = path.join(modelsDir(), file);
-  if (await exists(dest)) {
-    const s = await stat(dest);
-    if (s.size > 100_000_000) return dest;
-  }
-  const res = await fetch(url);
-  if (!res.ok || !res.body) {
-    throw new Error(`Model download failed: ${res.status}`);
-  }
-  const total = Number(res.headers.get("content-length") ?? "") || null;
-  let downloaded = 0;
-  const ts = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const reader = res.body!.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          downloaded += value.byteLength;
-          onProgress?.(downloaded, total);
-          controller.enqueue(value);
-        }
-      }
-      controller.close();
-    },
-  });
-  await pipeline(
-    Readable.fromWeb(ts as unknown as import("node:stream/web").ReadableStream<Uint8Array>),
-    createWriteStream(dest),
-  );
-  return dest;
-}
-
-function buildPrompt(opts: {
-  transcript: { start_ms: number; end_ms: number; speaker_id: string | null; text: string }[];
-  speakerLabels: Map<string, string>;
-  availableTags: string[];
-}): string {
-  const lines: string[] = [];
-  for (const seg of opts.transcript) {
-    const label = seg.speaker_id
-      ? (opts.speakerLabels.get(seg.speaker_id) ?? seg.speaker_id)
-      : "Speaker";
-    const t = formatMs(seg.start_ms);
-    lines.push(`[${t}] ${label}: ${seg.text}`);
-  }
-  const transcriptText = lines.join("\n");
-
-  const hasTags = opts.availableTags.length > 0;
-  const tagListBlock = hasTags
-    ? opts.availableTags.map((t) => `- ${t}`).join("\n")
-    : "(no tags defined — return an empty array for \"tags\")";
-
-  const tagsFieldSpec = hasTags
-    ? `- "tags": array of tag names chosen ONLY from the "Available tags" list below. Pick every tag that genuinely matches a topic discussed in the meeting. Return each tag EXACTLY as written in the list (same spelling, same case). Do NOT invent new tags, do NOT modify spelling, do NOT add a leading #. Return an empty array if none of the available tags fit.`
-    : `- "tags": MUST be an empty array []. No tags are defined.`;
-
-  return `You are an assistant that produces thorough, structured meeting notes from transcripts.
-
-Detect the transcript's language and write every string field in that language. Keep "assignee" as the literal speaker label from the transcript (e.g. "Alice", "Bob") or "Unassigned" if unclear.
-
-You MUST output a JSON object with these fields, populated with NON-EMPTY content (except "tags", see below):
-- "executive_summary": array of 3 to 6 short bullets. Each: {"topic": "<3-8 word headline>", "detail": "<one sentence with names/dates/numbers>"}.
+You MUST output a JSON object with these fields, populated with NON-EMPTY content (except "tags", which may be empty):
+- "executive_summary": array of 3 to 6 short bullets. Each {"topic": "<3-8 word headline>", "detail": "<one sentence with names/dates/numbers>"}.
 - "full_summary": prose overview of 4 to 8 sentences capturing the meeting's arc end-to-end.
-- "sections": array of 3 to 8 in-depth topic sections. Each: {"title": "<short topic title, max 6 words>", "content": "<2 to 6 sentences covering EVERYTHING said about this topic — context, who said what, conclusions, open questions, numbers, dates>"}. Together the sections MUST cover ALL distinct subjects discussed in the meeting, even minor ones. Do not summarize — be specific and verbose where the transcript supports it. Each section should stand on its own as a complete account of that topic.
+- "sections": array of 3 to 8 in-depth topic sections. Each {"title": "<short topic title, max 6 words>", "content": "<2 to 6 sentences covering EVERYTHING said about this topic — context, who said what, conclusions, open questions, numbers, dates>"}. Together the sections MUST cover ALL distinct subjects discussed in the meeting, even minor ones. Do not summarize — be specific and verbose where the transcript supports it. Each section should stand on its own as a complete account of that topic.
 - "decisions": array of concrete decisions (strings). Empty array only if none.
+- "key_points": array of 4 to 8 ultra-concise bullets — a TL;DR of the whole meeting for fast skimming. Each is ONE short line (a single clause, no "topic:" prefix and no trailing period required), capturing a top takeaway, decision, or number. Compress harder than the executive_summary; do not echo its wording verbatim.
 - "action_items": array of {"assignee": "<speaker name>", "text": "<task with any deadline>"}.
-${tagsFieldSpec}
+- "tags": array of tag names chosen ONLY from the "Available tags" list in the user message. Pick every tag that genuinely matches a topic discussed. Return each tag EXACTLY as listed (same spelling, same case, no leading #). Do NOT invent new tags. Empty array if no tags fit or none are defined.
 
-Available tags (the ONLY values allowed in "tags"):
-${tagListBlock}
+Markdown formatting is encouraged in the prose fields — "full_summary", every section "content", each "decisions" entry, each "key_points" entry, and the "detail" field of each executive bullet — when it genuinely helps readability. Use it for emphasis (**bold** for names/owners, *italics* for nuance), inline \`code\` for identifiers, bullet/numbered lists when the content is a list, and links with [text](url) when a URL was mentioned. Keep "topic", section "title", "assignee", and "tags" as plain text (no markdown). Do not wrap whole sections in code fences and do not invent headings — section titles already render as headings.
 
-Example output (for a different meeting; assume "pricing", "launch", and "qa" are in the available tags list):
+Example output (for a different meeting; assume "pricing", "launch", and "qa" are in that meeting's available tags list):
 {
   "executive_summary": [
     {"topic": "Launch date confirmed", "detail": "The team agreed to ship the new pricing page on October 14th."},
@@ -271,25 +90,118 @@ Example output (for a different meeting; assume "pricing", "launch", and "qa" ar
     {"title": "Onboarding redesign (Q1 preview)", "content": "Brief preview of work scheduled for next quarter. No decisions made; Alice will share a brief in two weeks."}
   ],
   "decisions": ["Ship the pricing page on October 14th conditional on green CI by Friday.", "Run a 10% experiment on the merged Pro/Business tier."],
+  "key_points": ["Pricing page ships Oct 14 if CI is green by Friday", "Pro and Business tiers merge at $49 behind a 10% experiment", "Annual plans keep the 20% discount", "Acme API rate-limit regression under investigation"],
   "action_items": [
-    {"assignee": "Maya", "text": "Land all end-to-end tests in CI by Friday Oct 11."},
-    {"assignee": "Sam", "text": "Draft and circulate the launch email by Wednesday."},
-    {"assignee": "Bob", "text": "Investigate Acme rate-limit regression and report back tomorrow."}
+    {"assignee": "<one of the allowed labels from the user message>", "text": "Land all end-to-end tests in CI by Friday Oct 11."},
+    {"assignee": "<one of the allowed labels from the user message>", "text": "Draft and circulate the launch email by Wednesday."},
+    {"assignee": "Unassigned", "text": "Investigate Acme rate-limit regression and report back tomorrow."}
   ],
   "tags": ["pricing", "launch", "qa"]
 }
 
-Be concrete and quote specifics (dates, names, numbers) from the transcript. Cover ALL topics — do not collapse multiple topics into one section. Only output JSON, no other commentary.
+CRITICAL: never invent assignee names. Use only the "Allowed assignees" listed in each user message. Use "Unassigned" if no one in the transcript clearly owns an action. Do NOT borrow names ("Alice", "Bob", "Maya", "Sam") from the example above — it is structural only.
+
+Only output JSON, no other commentary.`;
+
+function buildPrompt(opts: {
+  transcript: { start_ms: number; end_ms: number; speaker_id: string | null; text: string }[];
+  speakerLabels: Map<string, string>;
+  availableTags: string[];
+  aiLanguage: AiLanguage;
+  /** Template-specific persona/focus paragraph. Picked from the resolved
+   *  NotesTemplate's `instructions` field (which the user may have edited
+   *  or supplied via a custom template). The schema, example, and JSON
+   *  contract live in the stable system block. */
+  instructions: string;
+  /** Display label of the speaker who is the app user, when one is marked
+   *  ("me" in the People view). Lets the model attribute the reader's own
+   *  action items and address them directly. Null when unknown. */
+  meLabel: string | null;
+}): { system: string; user: string } {
+  const lines: string[] = [];
+  for (const seg of opts.transcript) {
+    const label = seg.speaker_id
+      ? (opts.speakerLabels.get(seg.speaker_id) ?? seg.speaker_id)
+      : "Speaker";
+    const t = formatMs(seg.start_ms);
+    lines.push(`[${t}] ${label}: ${seg.text}`);
+  }
+  const transcriptText = lines.join("\n");
+
+  // Whitelist of allowed assignee labels — built from the actual speakers
+  // present in this meeting (their current display_name + the raw speaker
+  // id from the transcript). The LLM has a tendency to lift names from the
+  // example block ("Sam", "Bob", "Maya") into action items when the
+  // transcript itself doesn't make ownership obvious. Surfacing the exact
+  // legal values here, plus rejecting unknown assignees post-parse,
+  // eliminates that hallucination class.
+  const allowedAssignees = new Set<string>(["Unassigned"]);
+  for (const label of opts.speakerLabels.values()) allowedAssignees.add(label);
+  for (const seg of opts.transcript) {
+    if (seg.speaker_id) allowedAssignees.add(seg.speaker_id);
+  }
+  const allowedAssigneesList = Array.from(allowedAssignees)
+    .map((a) => `"${a}"`)
+    .join(", ");
+
+  const hasTags = opts.availableTags.length > 0;
+  const tagsBlock = hasTags
+    ? `Available tags (use these EXACT values — same spelling, same case, no leading #):\n${opts.availableTags.map((t) => `- ${t}`).join("\n")}`
+    : `No tags are defined for this user — return an empty array for "tags".`;
+
+  const languageName: string | null =
+    opts.aiLanguage === "auto" ? null : LANGUAGE_LABEL[opts.aiLanguage];
+  const languageInstruction =
+    languageName === null
+      ? `Detect the transcript's language and write every string field in that language.`
+      : `WRITE EVERY STRING FIELD IN ${languageName.toUpperCase()}, including "topic", "detail", "full_summary", every section "title" and "content", every "decisions" entry, every "key_points" entry, and every action item "text" — regardless of the transcript's language and regardless of the language used in the example in your system prompt. The only exception is "assignee", which must stay as the literal speaker label from the transcript.`;
+
+  const languageReminder =
+    languageName === null
+      ? `Reminder: write every string field in the transcript's detected language.`
+      : `Reminder: write every string field in ${languageName} — section titles, decisions, key points, summaries, and action item text must all be in ${languageName}. The English wording in the system-prompt example is structural only; do not echo its language.`;
+
+  const meBlock = opts.meLabel
+    ? `\nThe speaker labelled "${opts.meLabel}" is the user you are writing these notes for. Treat action items they own as the reader's own tasks, and you may address them directly as "you" in the prose fields.\n`
+    : "";
+
+  const user = `${opts.instructions.trim()}
+
+${languageInstruction}
+
+Allowed assignees for "assignee" in action_items (the ONLY legal values): ${allowedAssigneesList}. Use "Unassigned" if no one in the transcript clearly owns the action.
+${meBlock}
+${tagsBlock}
+
+${languageReminder}
 
 Transcript:
 ${transcriptText}
 `;
+
+  return { system: SYSTEM_PROMPT_FIXED, user };
 }
 
 function formatMs(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   return `${m.toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+}
+
+// Pick a power-of-2 context size that fits the prompt + reserved output.
+// We over-estimate at chars/3 because whisper transcripts in non-English
+// languages tokenize denser than the usual chars/4 rule. Cap at 32k —
+// Qwen 2.5's native max — which is plenty for ~2h meetings and fits in
+// unified memory with a 12B Q4_K_M model loaded. Prompts that still
+// exceed 32k surface node-llama-cpp's clearer "context shift" error.
+const CTX_CANDIDATES = [8192, 16384, 32768] as const;
+const CTX_HEADROOM_TOKENS = 512;
+
+function pickContextSize(prompt: string, maxOutTokens: number): number {
+  const promptTokens = Math.ceil(prompt.length / 3);
+  const needed = promptTokens + maxOutTokens + CTX_HEADROOM_TOKENS;
+  for (const c of CTX_CANDIDATES) if (c >= needed) return c;
+  return CTX_CANDIDATES[CTX_CANDIDATES.length - 1];
 }
 
 const NOTES_SCHEMA = {
@@ -323,6 +235,12 @@ const NOTES_SCHEMA = {
       },
     },
     decisions: { type: "array", items: { type: "string" } },
+    key_points: {
+      type: "array",
+      minItems: 3,
+      maxItems: 8,
+      items: { type: "string" },
+    },
     action_items: {
       type: "array",
       items: {
@@ -341,12 +259,18 @@ const NOTES_SCHEMA = {
       items: { type: "string" },
     },
   },
-  required: ["executive_summary", "full_summary", "sections", "action_items"],
+  required: [
+    "executive_summary",
+    "full_summary",
+    "sections",
+    "key_points",
+    "action_items",
+  ],
 } as const;
 
 export async function generateNotes(opts: {
   meetingId: string;
-  model?: LlmModel;
+  modelOverride?: string;
 }): Promise<{
   ok: true;
   fullSummary: string;
@@ -359,24 +283,38 @@ export async function generateNotes(opts: {
   const transcript = listTranscript(opts.meetingId);
   if (transcript.length === 0) throw new Error("Meeting has no transcript");
 
-  const model = opts.model ?? "gemma-3-4b";
-  const badge = llmBadge(model);
-  emit(opts.meetingId, "model", 2, `ensuring ${model}`, badge);
-  const modelPath = await ensureModel(model, (d, t) => {
-    if (t) {
-      const pct = 2 + Math.round((d / t) * 25);
-      emit(
-        opts.meetingId,
-        "model",
-        pct,
-        `download ${(d / 1024 / 1024).toFixed(0)}/${(t / 1024 / 1024).toFixed(0)}MB`,
-        badge,
-      );
-    }
-  });
+  const provider = await getActiveProvider();
+  // The dispatcher branches on `agentMode`, not on `kind`:
+  //   - "via-tool-host" (anthropic) needs an injected MCP filesystem client
+  //     scoped to the KB folder. No KB folder → fall back to single-shot.
+  //   - "built-in" (claude-code) drives its own agent loop and consumes the
+  //     KB folder at provider creation time (via `--add-dir`); we just call
+  //     `generate` and the loop happens inside the CLI subprocess.
+  //   - "none" (bundled/ollama/openai) → single-shot only.
+  const kbPath =
+    provider.agentMode === "via-tool-host"
+      ? await getKbFilesystemPath()
+      : null;
+  const willRunAgent =
+    provider.agentMode === "built-in" || (provider.agentMode === "via-tool-host" && !!kbPath);
+  const baseLabel = provider.labelFor(opts.modelOverride);
+  const badge = willRunAgent ? `${baseLabel} · agent` : baseLabel;
+
+  // Per-meeting template override wins; otherwise resolveTemplate falls back
+  // to the user's global default, and ultimately to builtin:general.
+  const template = await resolveTemplate(meeting.notes_template_id);
 
   const speakers = listSpeakers(opts.meetingId);
   const labels = new Map(speakers.map((s) => [s.speaker_id, s.display_name]));
+
+  // If the user marked themselves ("me") in the People view and that person
+  // speaks in this meeting, surface their label so the model can attribute
+  // the reader's own action items and address them directly.
+  const meLibId = getMeLibraryId();
+  const meLabel = meLibId
+    ? (speakers.find((s) => s.voice_library_id === meLibId)?.display_name ??
+      null)
+    : null;
 
   // Only consider user-created tags. The LLM must pick from this list and is
   // forbidden from inventing new ones — tag creation is a manual UI action.
@@ -386,38 +324,78 @@ export async function generateNotes(opts: {
   );
   const availableTagNames = allTags.map((t) => t.name);
 
-  const prompt = buildPrompt({
+  const aiLanguage = await getAiLanguage();
+  const { system, user } = buildPrompt({
     transcript,
     speakerLabels: labels,
     availableTags: availableTagNames,
+    aiLanguage,
+    instructions: template.instructions,
+    meLabel,
   });
 
-  const workerResult = await runLlmWorker(
-    {
-      modelPath,
-      prompt,
-      schema: NOTES_SCHEMA,
-      maxTokens: 4000,
-      temperature: 0.2,
-      contextSize: 8192,
-      badge,
-    },
-    (stage, pct, note, model) =>
+  // Generous output budget. The schema is rich (executive summary +
+  // sections + decisions + action items + tags) and long meetings need
+  // room. Set to the max supported by Claude 4 (Opus/Haiku cap at 32K
+  // output, Sonnet goes higher but 32K is plenty); the model stops when
+  // done, so unused tokens cost nothing. Bundled (llama.cpp) models cap
+  // themselves below this anyway via pickContextSize.
+  const maxOutTokens = 32000;
+  const baseGenOpts = {
+    system,
+    prompt: user,
+    schema: NOTES_SCHEMA,
+    maxTokens: maxOutTokens,
+    temperature: 0.2,
+    modelOverride: opts.modelOverride,
+    // node-llama-cpp sizing — base on combined length, since the bundled
+    // provider concatenates system+user into one prompt for the worker.
+    contextSize: pickContextSize(`${system}\n\n${user}`, maxOutTokens),
+    onProgress: (stage: string, pct: number, note?: string, model?: string) =>
       emit(opts.meetingId, stage, pct, note, model ?? badge),
-  );
+  };
+
+  let raw: string;
+  let usage: NotesUsage | undefined;
+  if (provider.agentMode === "via-tool-host" && kbPath && provider.agenticGenerate) {
+    // Spawn the MCP filesystem server scoped to the KB folder, hand it to
+    // the provider's agent loop, dispose unconditionally so the subprocess
+    // doesn't leak across runs.
+    const mcp = new FilesystemMcpClient();
+    try {
+      await mcp.connect(kbPath);
+      const out = await provider.agenticGenerate({
+        ...baseGenOpts,
+        toolHost: mcp,
+      });
+      raw = out.raw;
+      usage = out.usage;
+    } finally {
+      await mcp.dispose();
+    }
+  } else {
+    const out = await provider.generate(baseGenOpts);
+    raw = out.raw;
+    usage = out.usage;
+  }
 
   let parsed: NotesOutput;
   try {
-    parsed = JSON.parse(workerResult.raw) as NotesOutput;
+    parsed = JSON.parse(raw) as NotesOutput;
   } catch (err) {
     throw new Error(
-      `LLM produced invalid JSON: ${(err as Error).message}\n${workerResult.raw.slice(0, 300)}`,
+      `LLM produced invalid JSON: ${(err as Error).message}\n${raw.slice(0, 300)}`,
     );
   }
 
   emit(opts.meetingId, "writing", 90, undefined, badge);
 
-  updatePipeline(opts.meetingId, { notes: badge });
+  updatePipeline(opts.meetingId, {
+    notes: badge,
+    notes_template_id: template.id,
+    notes_template_name: template.name,
+    ...(usage ? { notes_usage: usage } : {}),
+  });
 
   setSummary(opts.meetingId, JSON.stringify({
     executive_summary: parsed.executive_summary,
@@ -426,6 +404,17 @@ export async function generateNotes(opts: {
     decisions: parsed.decisions ?? [],
     generated_at_ms: Date.now(),
   }));
+
+  // Condensed "key points" ride along in the same LLM pass (zero extra cost)
+  // and land in their own column so the Bullet points tab and the MCP
+  // `set_bullets` tool can read/write them independently of the summary blob.
+  const keyPoints = Array.isArray(parsed.key_points)
+    ? parsed.key_points.filter((s) => typeof s === "string" && s.trim() !== "")
+    : [];
+  setBullets(
+    opts.meetingId,
+    keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
+  );
 
   // Refresh auto-attached tags from the model. The model may ONLY pick from
   // the user's existing tag list — any value that doesn't match an existing
@@ -456,16 +445,24 @@ export async function generateNotes(opts: {
     for (const item of parsed.action_items) {
       let assigneeSpeakerId: string | null = null;
       if (item.assignee && item.assignee !== "Unassigned") {
+        // Strict match against the actual meeting speakers (display_name OR
+        // raw pyannote id). We deliberately do NOT create phantom rows for
+        // unmatched names anymore — the LLM occasionally lifts names from
+        // its example block ("Sam", "Bob", "Maya") when ownership is
+        // ambiguous, and inserting those into the speakers table polluted
+        // the chip with people who never spoke. Dropping the assignee back
+        // to null is much safer than inventing a speaker.
+        const lower = item.assignee.toLowerCase();
         const match = speakers.find(
-          (s) => s.display_name.toLowerCase() === item.assignee.toLowerCase(),
+          (s) =>
+            s.display_name.toLowerCase() === lower ||
+            s.speaker_id.toLowerCase() === lower,
         );
         if (match) {
           assigneeSpeakerId = match.speaker_id;
-        } else {
-          const stableId = `unmatched:${item.assignee}`;
-          upsertSpeaker(opts.meetingId, stableId, item.assignee);
-          assigneeSpeakerId = stableId;
         }
+        // else: task created without assignee — user can re-assign in the
+        // tasks view if the LLM got it wrong by name only.
       }
       insertTask(opts.meetingId, assigneeSpeakerId, item.text);
     }

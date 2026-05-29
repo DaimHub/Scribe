@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowLeft01Icon,
@@ -18,10 +19,15 @@ import {
   Edit02Icon,
   GridViewIcon,
   Menu01Icon,
+  Refresh01Icon,
   Settings01Icon,
 } from "@hugeicons/core-free-icons";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// How often to silently re-hit Google for new events while the calendar
+// page is open. 5 minutes balances "fresh enough for upcoming-meeting
+// awareness" against Google API quota and battery.
+const CALENDAR_AUTO_RESYNC_MS = 5 * 60 * 1000;
 
 type ViewMode = "list" | "month";
 
@@ -31,7 +37,10 @@ export function CalendarView() {
   const loadAccounts = useScribe((s) => s.loadCalendarAccounts);
   const loadEvents = useScribe((s) => s.loadCalendarEvents);
   const setActiveSection = useScribe((s) => s.setActiveSection);
+  const resyncCalendars = useScribe((s) => s.resyncCalendars);
+  const calendarSyncing = useScribe((s) => s.calendarSyncing);
   const [view, setView] = useState<ViewMode>("list");
+  const t = useT();
 
   // Month-view cursor: first day of the visible month.
   const [monthCursor, setMonthCursor] = useState<Date>(() => startOfMonth(new Date()));
@@ -52,10 +61,29 @@ export function CalendarView() {
     return { fromMs: now - 7 * DAY_MS, toMs: now + 60 * DAY_MS };
   }, [view, monthCursor]);
 
+  // refreshTick is in the dep array so the global top-bar refresh button
+  // re-loads events even when the visible date range hasn't moved.
+  const refreshTick = useScribe((s) => s.refreshTick);
   useEffect(() => {
     if (accounts.length === 0) return;
     void loadEvents(fromMs, toMs);
-  }, [accounts.length, fromMs, toMs, loadEvents]);
+  }, [accounts.length, fromMs, toMs, loadEvents, refreshTick]);
+
+  // Smart resync: while the calendar page is mounted and the window is
+  // visible, hit Google every CALENDAR_AUTO_RESYNC_MS to pull in new/
+  // updated events without a manual click. Pauses automatically when the
+  // tab is hidden (document.hidden) and naturally resumes on the next
+  // tick after the user comes back. resyncCalendars() guards against
+  // concurrent calls via its own `calendarSyncing` flag.
+  useEffect(() => {
+    if (accounts.length === 0) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void resyncCalendars(fromMs, toMs);
+    };
+    const id = window.setInterval(tick, CALENDAR_AUTO_RESYNC_MS);
+    return () => window.clearInterval(id);
+  }, [accounts.length, fromMs, toMs, resyncCalendars]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -65,14 +93,30 @@ export function CalendarView() {
             icon={Calendar03Icon}
             className="size-6 text-foreground/80"
           />
-          <h1 className="text-2xl font-bold tracking-tight">Calendar</h1>
-          <div className="ml-auto">
+          <h1 className="text-2xl font-bold tracking-tight">
+            {t("calendar.title")}
+          </h1>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void resyncCalendars(fromMs, toMs)}
+              disabled={calendarSyncing || accounts.length === 0}
+              className="gap-1.5"
+              aria-label={t("calendar.resync")}
+              title={t("calendar.resync")}
+            >
+              <HugeiconsIcon
+                icon={Refresh01Icon}
+                className={cn("size-3.5", calendarSyncing && "animate-spin")}
+              />
+              {calendarSyncing
+                ? t("calendar.resyncing")
+                : t("calendar.resync")}
+            </Button>
             <ViewToggle value={view} onChange={setView} />
           </div>
         </div>
-        <p className="mt-1.5 text-sm text-muted-foreground">
-          Your Google Calendar events, linked to your Scribe recordings when they overlap.
-        </p>
       </header>
 
       <ScrollArea className="min-h-0 flex-1">
@@ -84,7 +128,7 @@ export function CalendarView() {
                   icon={Calendar03Icon}
                   className="size-4 text-muted-foreground"
                 />
-                <span>No calendar connected.</span>
+                <span>{t("calendar.notConnected")}</span>
               </div>
               <Button
                 size="sm"
@@ -93,7 +137,7 @@ export function CalendarView() {
                 className="gap-1.5"
               >
                 <HugeiconsIcon icon={Settings01Icon} className="size-3.5" />
-                Open Settings
+                {t("nav.openSettings")}
               </Button>
             </div>
           )}
@@ -120,6 +164,7 @@ function ViewToggle({
   value: ViewMode;
   onChange: (v: ViewMode) => void;
 }) {
+  const t = useT();
   return (
     <ToggleGroup
       value={value}
@@ -128,15 +173,15 @@ function ViewToggle({
         if (next) onChange(next);
       }}
       size="xs"
-      aria-label="Calendar view"
+      aria-label={t("calendar.view")}
     >
-      <ToggleGroupItem value="list" aria-label="List view">
+      <ToggleGroupItem value="list" aria-label={t("calendar.listView")}>
         <HugeiconsIcon icon={Menu01Icon} className="size-3.5" />
-        List
+        {t("calendar.listView")}
       </ToggleGroupItem>
-      <ToggleGroupItem value="month" aria-label="Month view">
+      <ToggleGroupItem value="month" aria-label={t("calendar.monthView")}>
         <HugeiconsIcon icon={GridViewIcon} className="size-3.5" />
-        Month
+        {t("calendar.monthView")}
       </ToggleGroupItem>
     </ToggleGroup>
   );
@@ -151,12 +196,14 @@ function CalendarList({
 }: {
   events: CalendarEventLike[];
 }) {
+  const t = useT();
+  const language = useScribe((s) => s.displayLanguage);
   // Split the day-grouped events into past (strictly before today) and
   // upcoming (today + future). Past gets reversed so the most recent day is
   // at the top of the section once expanded — matches how the user reads
   // history. Default-collapsed because the page is forward-looking.
   const { past, upcoming } = useMemo(() => {
-    const grouped = groupByDay(events);
+    const grouped = groupByDay(events, t, language);
     const startOfToday = (() => {
       const d = new Date();
       d.setHours(0, 0, 0, 0);
@@ -171,7 +218,7 @@ function CalendarList({
     }
     past.reverse();
     return { past, upcoming };
-  }, [events]);
+  }, [events, t, language]);
 
   const [showPast, setShowPast] = useState(false);
   const pastCount = useMemo(
@@ -182,7 +229,7 @@ function CalendarList({
   if (events.length === 0) {
     return (
       <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-        No events in the next 60 days. Hit the refresh icon to sync.
+        {t("calendar.empty.list")}
       </div>
     );
   }
@@ -191,11 +238,11 @@ function CalendarList({
     <div className="flex flex-col gap-6">
       {past.length > 0 && (
         <section className="flex flex-col gap-2">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={() => setShowPast((v) => !v)}
             aria-expanded={showPast}
-            className="-mx-1 inline-flex items-center gap-2 self-start rounded px-1 py-1 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+            className="-mx-1 h-auto self-start gap-2 px-1 py-1 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
           >
             <HugeiconsIcon
               icon={ArrowDown01Icon}
@@ -205,12 +252,14 @@ function CalendarList({
               )}
             />
             <span className="font-semibold uppercase tracking-wider">
-              Past
+              {t("calendar.past")}
             </span>
             <span className="text-[11px] normal-case tracking-normal">
-              {pastCount} {pastCount === 1 ? "event" : "events"}
+              {pastCount === 1
+                ? t("calendar.eventOne", { count: pastCount })
+                : t("calendar.eventMany", { count: pastCount })}
             </span>
-          </button>
+          </Button>
           {showPast && (
             <div className="flex flex-col gap-6 opacity-80">
               {past.map((g) => (
@@ -229,7 +278,7 @@ function CalendarList({
         // Nothing coming up — make sure the user sees that explicitly rather
         // than reading the past list as if it were the schedule.
         <div className="rounded-md border border-dashed bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-          Nothing coming up. Past events are above.
+          {t("calendar.empty.upcoming")}
         </div>
       )}
     </div>
@@ -241,12 +290,15 @@ function DayGroup({
 }: {
   group: { key: string; label: string; events: CalendarEventLike[] };
 }) {
+  const t = useT();
   return (
     <section className="flex flex-col gap-2">
       <div className="sticky top-0 z-10 -mx-1 flex items-baseline gap-3 bg-background/95 px-1 py-1 backdrop-blur">
         <h3 className="text-sm font-semibold tracking-tight">{group.label}</h3>
         <span className="text-[11px] text-muted-foreground">
-          {group.events.length} {group.events.length === 1 ? "event" : "events"}
+          {group.events.length === 1
+            ? t("calendar.eventOne", { count: group.events.length })
+            : t("calendar.eventMany", { count: group.events.length })}
         </span>
       </div>
       <ul className="flex flex-col">
@@ -301,10 +353,12 @@ function CalendarMonth({
   setCursor: (d: Date) => void;
   events: CalendarEventLike[];
 }) {
+  const t = useT();
+  const language = useScribe((s) => s.displayLanguage);
   const grid = useMemo(() => buildMonthGrid(cursor), [cursor]);
   const eventsByDay = useMemo(() => bucketEventsByDay(events), [events]);
 
-  const monthLabel = cursor.toLocaleDateString(undefined, {
+  const monthLabel = cursor.toLocaleDateString(language, {
     month: "long",
     year: "numeric",
   });
@@ -315,22 +369,22 @@ function CalendarMonth({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={() => setCursor(addMonths(cursor, -1))}
-          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label="Previous month"
+          aria-label={t("calendar.prevMonth")}
         >
           <HugeiconsIcon icon={ArrowLeft01Icon} className="size-4" />
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
           onClick={() => setCursor(addMonths(cursor, 1))}
-          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label="Next month"
+          aria-label={t("calendar.nextMonth")}
         >
           <HugeiconsIcon icon={ArrowRight01Icon} className="size-4" />
-        </button>
+        </Button>
         <h2 className="text-base font-semibold tracking-tight capitalize">
           {monthLabel}
         </h2>
@@ -340,7 +394,7 @@ function CalendarMonth({
           onClick={() => setCursor(startOfMonth(new Date()))}
           className="ml-1"
         >
-          Today
+          {t("calendar.today")}
         </Button>
       </div>
 
@@ -417,7 +471,7 @@ function CalendarMonth({
                   ))}
                   {dayEvents.length > 3 && (
                     <li className="px-1 text-[9.5px] text-muted-foreground">
-                      +{dayEvents.length - 3} more
+                      {t("common.plusMore", { count: dayEvents.length - 3 })}
                     </li>
                   )}
                 </ul>
@@ -431,14 +485,15 @@ function CalendarMonth({
 }
 
 function RecordedBadge() {
+  const t = useT();
   return (
     <Badge
       variant="outline"
       className="gap-1 border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-      title="A Scribe recording is linked to this event"
+      title={t("calendar.recordedTooltip")}
     >
       <HugeiconsIcon icon={Edit02Icon} className="size-2.5" />
-      Recorded
+      {t("status.recorded")}
     </Badge>
   );
 }
@@ -459,6 +514,8 @@ interface CalendarEventLike {
 
 function groupByDay(
   events: CalendarEventLike[],
+  t: ReturnType<typeof useT>,
+  language: string,
 ): Array<{ key: string; label: string; events: CalendarEventLike[] }> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -478,11 +535,11 @@ function groupByDay(
     const dayMs = new Date(key).getTime();
     const diffDays = Math.round((dayMs - startOfToday) / DAY_MS);
     let label: string;
-    if (diffDays === 0) label = "Today";
-    else if (diffDays === 1) label = "Tomorrow";
-    else if (diffDays === -1) label = "Yesterday";
+    if (diffDays === 0) label = t("calendar.today");
+    else if (diffDays === 1) label = t("calendar.tomorrow");
+    else if (diffDays === -1) label = t("calendar.yesterday");
     else
-      label = new Date(dayMs).toLocaleDateString(undefined, {
+      label = new Date(dayMs).toLocaleDateString(language, {
         weekday: "long",
         month: "short",
         day: "numeric",

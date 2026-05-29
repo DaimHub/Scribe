@@ -1,10 +1,16 @@
 # Pinned to versions that compose cleanly as of 2026-05.
 # torch/torchaudio capped at <2.9 because torchaudio 2.9 dropped
-# `AudioMetaData`, which pyannote.audio 3.x still references at module load.
+# `AudioMetaData`, which pyannote.audio still references at module load.
 torch>=2.5,<2.9
 torchaudio>=2.5,<2.9
 faster-whisper>=1.0
-pyannote.audio>=3.1,<4
+# pyannote.audio 4.x unlocks the community-1 diarization pipeline (PLDA
+# clustering), which separates overlapping/in-room speakers far better than
+# the 3.x line. whisperx still pins <4.x in its metadata, but it only uses
+# Pipeline.from_pretrained() — the API is unchanged across the bump, so the
+# two coexist fine. Install pyannote AFTER whisperx (or with --upgrade) so
+# pip resolves to 4.x.
+pyannote.audio>=4.0,<5
 transformers>=4.40
 ctranslate2>=4.4
 # whisperx pulls the rest in; pin its minimum so we get current API

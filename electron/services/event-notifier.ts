@@ -1,3 +1,4 @@
+import { powerSaveBlocker } from "electron";
 import { listCalendarAccounts, listCalendarEventsOverlapping } from "./db.js";
 import { showNotification } from "./floating-windows.js";
 
@@ -24,6 +25,11 @@ interface NotifiedEntry {
 
 const notified = new Map<string, NotifiedEntry>();
 let timer: NodeJS.Timeout | null = null;
+// macOS App Nap can suspend the main process when it's been backgrounded for
+// a while, which pauses our setInterval and makes us miss the 2-min lead
+// notification. prevent-app-suspension keeps the process eligible to run
+// without preventing display sleep, so battery impact is minimal.
+let powerBlockerId: number | null = null;
 
 function tick(): void {
   try {
@@ -64,6 +70,9 @@ function tick(): void {
 
 export function startEventNotifier(): void {
   if (timer != null) return;
+  if (powerBlockerId == null) {
+    powerBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+  }
   // First tick after a short delay so the DB/IPC are warm.
   setTimeout(tick, 2000);
   timer = setInterval(tick, POLL_INTERVAL_MS);
@@ -73,6 +82,10 @@ export function stopEventNotifier(): void {
   if (timer != null) {
     clearInterval(timer);
     timer = null;
+  }
+  if (powerBlockerId != null) {
+    powerSaveBlocker.stop(powerBlockerId);
+    powerBlockerId = null;
   }
 }
 

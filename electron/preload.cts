@@ -2,6 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 
 type AudioChannel = "mic" | "system";
 
+type ScreenAccessStatus =
+  | "not-determined"
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "unknown";
+
+type DisplayLanguage = "en" | "fr" | "es" | "de";
+type AiLanguage = "auto" | "en" | "fr" | "es" | "de";
+
 type MeetingStatus =
   | "recording"
   | "recorded"
@@ -25,6 +35,9 @@ interface MeetingRow {
   position: number;
   pinned: 0 | 1;
   pipeline_json: string | null;
+  notes_template_id: string | null;
+  bullets_json: string | null;
+  scratchpad: string | null;
 }
 
 interface FolderRow {
@@ -72,6 +85,8 @@ interface SpeakerRow {
 interface VoiceLibraryRow {
   id: string;
   display_name: string;
+  email: string | null;
+  is_me: 0 | 1;
   dim: number;
   sample_clip_path: string | null;
   n_meetings: number;
@@ -102,6 +117,8 @@ interface PendingReviewSpeaker {
   display_name: string;
   sample_clip_path: string | null;
   match_confidence: number | null;
+  voice_library_id: string | null;
+  email: string | null;
   candidates: Array<{
     library_id: string;
     display_name: string;
@@ -231,6 +248,12 @@ const scribe = {
         samples,
       });
     },
+
+    getScreenAccessStatus: (): Promise<ScreenAccessStatus> =>
+      ipcRenderer.invoke("audio:getScreenAccessStatus"),
+
+    openScreenSettings: (): Promise<void> =>
+      ipcRenderer.invoke("audio:openScreenSettings"),
   },
 
   meetings: {
@@ -241,6 +264,8 @@ const scribe = {
       ipcRenderer.invoke("meetings:setTitle", id, title),
     setStatus: (id: string, status: MeetingStatus): Promise<MeetingRow | null> =>
       ipcRenderer.invoke("meetings:setStatus", id, status),
+    setScratchpad: (id: string, text: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("meetings:setScratchpad", id, text),
     delete: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("meetings:delete", id),
     setPinned: (id: string, pinned: boolean): Promise<{ ok: boolean }> =>
@@ -269,6 +294,11 @@ const scribe = {
       ipcRenderer.on("voice:postProcess", handler);
       return () => ipcRenderer.removeListener("voice:postProcess", handler);
     },
+    onLibraryChanged: (cb: () => void): (() => void) => {
+      const handler = () => cb();
+      ipcRenderer.on("voice:libraryChanged", handler);
+      return () => ipcRenderer.removeListener("voice:libraryChanged", handler);
+    },
     renameLibraryEntry: (
       id: string,
       displayName: string,
@@ -276,13 +306,24 @@ const scribe = {
       ipcRenderer.invoke("voice:renameLibraryEntry", id, displayName),
     deleteLibraryEntry: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("voice:deleteLibraryEntry", id),
-    pendingReview: (meetingId: string): Promise<PendingReviewSpeaker[]> =>
-      ipcRenderer.invoke("voice:pendingReview", meetingId),
+    setLibraryEmail: (
+      id: string,
+      email: string | null,
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("voice:setLibraryEmail", id, email),
+    setMe: (id: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("voice:setMe", id),
+    pendingReview: (
+      meetingId: string,
+      includeReviewed?: boolean,
+    ): Promise<PendingReviewSpeaker[]> =>
+      ipcRenderer.invoke("voice:pendingReview", meetingId, !!includeReviewed),
     assignToLibrary: (
       meetingId: string,
       speakerId: string,
       libraryId: string,
       displayName: string,
+      email?: string | null,
     ): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke(
         "voice:assignToLibrary",
@@ -290,17 +331,20 @@ const scribe = {
         speakerId,
         libraryId,
         displayName,
+        email ?? null,
       ),
     createFromSpeaker: (
       meetingId: string,
       speakerId: string,
       displayName: string,
+      email?: string | null,
     ): Promise<{ ok: boolean; libraryId: string | null }> =>
       ipcRenderer.invoke(
         "voice:createFromSpeaker",
         meetingId,
         speakerId,
         displayName,
+        email ?? null,
       ),
     dismissReview: (
       meetingId: string,
@@ -317,6 +361,30 @@ const scribe = {
     setDone: (taskId: number, done: boolean): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("tasks:setDone", taskId, done),
     listAll: (): Promise<AggregatedTaskRow[]> => ipcRenderer.invoke("tasks:listAll"),
+    add: (
+      meetingId: string,
+      text: string,
+      assigneeSpeakerId: string | null,
+    ): Promise<TaskRow> =>
+      ipcRenderer.invoke("tasks:add", meetingId, text, assigneeSpeakerId),
+    duplicate: (taskId: number): Promise<TaskRow | null> =>
+      ipcRenderer.invoke("tasks:duplicate", taskId),
+    delete: (taskId: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("tasks:delete", taskId),
+    setPriority: (taskId: number, priority: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("tasks:setPriority", taskId, priority),
+    setDueDate: (
+      taskId: number,
+      dueAtMs: number | null,
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("tasks:setDueDate", taskId, dueAtMs),
+    setAssignee: (
+      taskId: number,
+      speakerId: string | null,
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("tasks:setAssignee", taskId, speakerId),
+    updateText: (taskId: number, text: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("tasks:updateText", taskId, text),
   },
 
   personalTasks: {
@@ -469,11 +537,27 @@ const scribe = {
       ipcRenderer.invoke("settings:getHfTokenMasked"),
     clearHfToken: (): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke("settings:clearHfToken"),
+    getDisplayLanguage: (): Promise<DisplayLanguage> =>
+      ipcRenderer.invoke("settings:getDisplayLanguage"),
+    setDisplayLanguage: (lang: DisplayLanguage): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("settings:setDisplayLanguage", lang),
+    getAiLanguage: (): Promise<AiLanguage> =>
+      ipcRenderer.invoke("settings:getAiLanguage"),
+    setAiLanguage: (lang: AiLanguage): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("settings:setAiLanguage", lang),
   },
 
   transcribe: {
-    run: (meetingId: string): Promise<{ ok: boolean; segments: number }> =>
-      ipcRenderer.invoke("transcribe:run", meetingId),
+    run: (
+      meetingId: string,
+      numSpeakers?: number,
+    ): Promise<{ ok: boolean; segments: number }> =>
+      ipcRenderer.invoke("transcribe:run", meetingId, numSpeakers),
+    rediarize: (
+      meetingId: string,
+      numSpeakers?: number,
+    ): Promise<{ ok: boolean; speakers: number; segmentsTagged: number }> =>
+      ipcRenderer.invoke("transcribe:rediarize", meetingId, numSpeakers),
     onProgress: (
       cb: (payload: {
         meetingId: string;
@@ -501,13 +585,14 @@ const scribe = {
   llm: {
     generate: (
       meetingId: string,
+      opts?: { modelOverride?: string },
     ): Promise<{
       ok: true;
       fullSummary: string;
       bullets: number;
       decisions: number;
       actionItems: number;
-    }> => ipcRenderer.invoke("llm:generate", meetingId),
+    }> => ipcRenderer.invoke("llm:generate", meetingId, opts),
     onProgress: (
       cb: (payload: {
         meetingId: string;
@@ -530,6 +615,296 @@ const scribe = {
       ipcRenderer.on("llm:progress", handler);
       return () => ipcRenderer.removeListener("llm:progress", handler);
     },
+
+    // --- Provider configuration ------------------------------------------
+    getProviderConfig: (): Promise<{
+      provider: "bundled" | "ollama" | "openai" | "anthropic" | "claude-code";
+      bundled_model: string;
+      bundled_models: readonly string[];
+      ollama_endpoint: string;
+      ollama_model: string | null;
+      openai_endpoint: string;
+      openai_model: string | null;
+      has_openai_key: boolean;
+      anthropic_endpoint: string;
+      anthropic_model: string | null;
+      has_anthropic_key: boolean;
+      claude_code_model: string;
+    }> => ipcRenderer.invoke("llm:getProviderConfig"),
+    setProvider: (
+      provider:
+        | "bundled"
+        | "ollama"
+        | "openai"
+        | "anthropic"
+        | "claude-code",
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setProvider", provider),
+    setBundledModel: (model: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setBundledModel", model),
+    setOllamaConfig: (opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setOllamaConfig", opts),
+    setOpenAiConfig: (opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setOpenAiConfig", opts),
+    setOpenAiKey: (key: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setOpenAiKey", key),
+    clearOpenAiKey: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:clearOpenAiKey"),
+    setAnthropicConfig: (opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setAnthropicConfig", opts),
+    setAnthropicKey: (key: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setAnthropicKey", key),
+    clearAnthropicKey: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:clearAnthropicKey"),
+    getKbFilesystemPath: (): Promise<string> =>
+      ipcRenderer.invoke("llm:getKbFilesystemPath"),
+    setKbFilesystemPath: (p: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setKbFilesystemPath", p),
+    checkKbFilesystem: (
+      override?: string,
+    ): Promise<
+      | {
+          ok: false;
+          reason: "missing" | "not_dir" | "no_access" | "empty" | "error";
+          message: string;
+        }
+      | {
+          ok: true;
+          path: string;
+          files: number;
+          truncated: boolean;
+          size_bytes: number;
+          extensions: Record<string, number>;
+          sample: string[];
+        }
+    > => ipcRenderer.invoke("llm:checkKbFilesystem", override),
+    detectClaudeCode: (): Promise<{
+      installed: boolean;
+      authed: boolean;
+      version?: string;
+      error?: string;
+    }> => ipcRenderer.invoke("llm:detectClaudeCode"),
+    setClaudeCodeConfig: (opts: {
+      model?: string;
+    }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:setClaudeCodeConfig", opts),
+    listClaudeCodeModels: (): Promise<string[]> =>
+      ipcRenderer.invoke("llm:listClaudeCodeModels"),
+    getUsageStats: (filter?: {
+      billingKind?: "subscription" | "metered";
+    }): Promise<{
+      meetings: number;
+      cost_usd: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+      duration_ms: number;
+      num_turns: number;
+      max_single_cost_usd: number;
+      last_used_at_ms: number | null;
+    }> => ipcRenderer.invoke("llm:getUsageStats", filter),
+    detectOllama: (
+      endpoint?: string,
+    ): Promise<{
+      running: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ name: string; size: number; modified_at: string }>;
+    }> => ipcRenderer.invoke("llm:detectOllama", endpoint),
+    detectOpenAi: (override?: {
+      endpoint?: string;
+      apiKey?: string | null;
+    }): Promise<{
+      ok: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ id: string; owned_by?: string }>;
+    }> => ipcRenderer.invoke("llm:detectOpenAi", override),
+    detectAnthropic: (override?: {
+      endpoint?: string;
+      apiKey?: string | null;
+    }): Promise<{
+      ok: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ id: string; display_name?: string }>;
+    }> => ipcRenderer.invoke("llm:detectAnthropic", override),
+
+    listBundledModels: (): Promise<
+      Array<{
+        id: string;
+        displayName: string;
+        approxSizeMb: number;
+        downloaded: boolean;
+        downloading?: { downloadedBytes: number; totalBytes: number | null };
+      }>
+    > => ipcRenderer.invoke("llm:listBundledModels"),
+    downloadBundledModel: (
+      model: string,
+    ): Promise<{ ok: boolean; alreadyRunning: boolean }> =>
+      ipcRenderer.invoke("llm:downloadBundledModel", model),
+    deleteBundledModel: (model: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("llm:deleteBundledModel", model),
+    onBundledDownloadProgress: (
+      cb: (payload: {
+        model: string;
+        downloadedBytes: number;
+        totalBytes: number | null;
+      }) => void,
+    ): (() => void) => {
+      const handler = (
+        _: unknown,
+        payload: {
+          model: string;
+          downloadedBytes: number;
+          totalBytes: number | null;
+        },
+      ) => cb(payload);
+      ipcRenderer.on("llm:bundled-download-progress", handler);
+      return () =>
+        ipcRenderer.removeListener("llm:bundled-download-progress", handler);
+    },
+    onBundledDownloadDone: (
+      cb: (payload: { model: string; ok: boolean; error?: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _: unknown,
+        payload: { model: string; ok: boolean; error?: string },
+      ) => cb(payload);
+      ipcRenderer.on("llm:bundled-download-done", handler);
+      return () =>
+        ipcRenderer.removeListener("llm:bundled-download-done", handler);
+    },
+  },
+
+  templates: {
+    list: (): Promise<{
+      templates: Array<{
+        id: string;
+        name: string;
+        instructions: string;
+        builtin: boolean;
+      }>;
+      defaultId: string;
+    }> => ipcRenderer.invoke("templates:list"),
+    create: (opts: {
+      name: string;
+      instructions: string;
+    }): Promise<{
+      id: string;
+      name: string;
+      instructions: string;
+      builtin: boolean;
+    }> => ipcRenderer.invoke("templates:create", opts),
+    update: (
+      id: string,
+      patch: { name?: string; instructions?: string },
+    ): Promise<{
+      id: string;
+      name: string;
+      instructions: string;
+      builtin: boolean;
+    }> => ipcRenderer.invoke("templates:update", { id, patch }),
+    delete: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("templates:delete", id),
+    reset: (
+      id: string,
+    ): Promise<{
+      id: string;
+      name: string;
+      instructions: string;
+      builtin: boolean;
+    }> => ipcRenderer.invoke("templates:reset", id),
+    setDefault: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("templates:setDefault", id),
+    setMeetingTemplate: (
+      meetingId: string,
+      templateId: string | null,
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("templates:setMeetingTemplate", {
+        meetingId,
+        templateId,
+      }),
+  },
+
+  find: {
+    start: (
+      query: string,
+      options?: { forward?: boolean; findNext?: boolean; matchCase?: boolean },
+    ): Promise<{ requestId: number }> =>
+      ipcRenderer.invoke("find:start", query, options),
+    stop: (
+      action?: "clearSelection" | "keepSelection" | "activateSelection",
+    ): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("find:stop", action ?? "clearSelection"),
+    onResult: (
+      cb: (payload: {
+        requestId: number;
+        activeMatchOrdinal: number;
+        matches: number;
+        finalUpdate: boolean;
+      }) => void,
+    ): (() => void) => {
+      const handler = (
+        _: unknown,
+        payload: {
+          requestId: number;
+          activeMatchOrdinal: number;
+          matches: number;
+          finalUpdate: boolean;
+        },
+      ) => cb(payload);
+      ipcRenderer.on("find:result", handler);
+      return () => ipcRenderer.removeListener("find:result", handler);
+    },
+  },
+
+  mcp: {
+    getServerInfo: (): Promise<{
+      scriptPath: string | null;
+      claudeDesktopConfigPath: string;
+      configSnippet: string;
+      requiresNode: boolean;
+      allowWrites: boolean;
+    }> => ipcRenderer.invoke("mcp:getServerInfo"),
+    setAllowWrites: (allow: boolean): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("mcp:setAllowWrites", allow),
+    revealClaudeConfig: (): Promise<{
+      ok: boolean;
+      revealed: "file" | "directory" | "none";
+      path?: string;
+    }> => ipcRenderer.invoke("mcp:revealClaudeConfig"),
+    getSkillInfo: (): Promise<{
+      status: "not-installed" | "installed" | "outdated" | "missing";
+      bundledPath: string | null;
+      installedPath: string;
+      bundledSize: number | null;
+      installedMtimeMs: number | null;
+      hasUserSection: boolean;
+    }> => ipcRenderer.invoke("mcp:getSkillInfo"),
+    installSkill: (): Promise<{
+      ok: boolean;
+      installedPath: string;
+      error?: string;
+      preservedUserSection?: boolean;
+      backupPath?: string;
+    }> => ipcRenderer.invoke("mcp:installSkill"),
+    uninstallSkill: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke("mcp:uninstallSkill"),
+    revealInstalledSkill: (): Promise<{
+      ok: boolean;
+      revealed: "file" | "parent" | "none";
+    }> => ipcRenderer.invoke("mcp:revealInstalledSkill"),
   },
 
   // --- Floating windows (mini recorder + meeting notification) -------------

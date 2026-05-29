@@ -5,15 +5,33 @@ import type { MeetingDetail, MeetingSummary } from "@/lib/scribe-global";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Copy01Icon, SparklesIcon } from "@hugeicons/core-free-icons";
+import {
+  ArrowDown01Icon,
+  Copy01Icon,
+  SparklesIcon,
+} from "@hugeicons/core-free-icons";
 import { useScribe } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { TemplateMenuItems } from "./template-menu-items";
+import { useTemplatesList } from "@/lib/use-templates-list";
+import { Markdown } from "./markdown";
+import { AnthropicModelPicker, useAskMode } from "./anthropic-model-picker";
 
 export function SummaryView({ detail }: { detail: MeetingDetail }) {
   const generate = useScribe((s) => s.generate);
-  const processMeeting = useScribe((s) => s.processMeeting);
+  const openSpeakerPrompt = useScribe((s) => s.openSpeakerPrompt);
+  const reportError = useScribe((s) => s.reportError);
   const processing = useScribe((s) => s.processing);
   const [copied, setCopied] = useState(false);
+  const [chosenModel, setChosenModel] = useState<string | null>(null);
+  const askMode = useAskMode();
+  const t = useT();
 
   const summary = useMemo<MeetingSummary | null>(() => {
     if (!detail.meeting.summary_json) return null;
@@ -59,30 +77,44 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center">
         <div className="text-sm font-medium text-muted-foreground">
-          No summary yet
+          {t("summary.empty.title")}
         </div>
         <div className="max-w-sm text-xs text-muted-foreground">
           {hasTranscript
-            ? "Generate notes to produce an in-depth, multi-section summary."
-            : "Process the recording to transcribe and produce notes in one go."}
+            ? t("summary.empty.generate")
+            : t("summary.empty.process")}
         </div>
-        <Button
-          size="sm"
-          className="mt-2 gap-1.5"
-          onClick={() =>
-            hasTranscript
-              ? void generate(detail.meeting.id)
-              : void processMeeting(detail.meeting.id)
-          }
-          disabled={isBusy}
-        >
-          <HugeiconsIcon icon={SparklesIcon} className="size-3.5" />
-          {isBusy
-            ? "Processing…"
-            : hasTranscript
-              ? "Generate notes"
-              : "Process meeting"}
-        </Button>
+        {hasTranscript && (
+          <AnthropicModelPicker
+            value={chosenModel}
+            onChange={setChosenModel}
+            className="w-56 items-start text-left"
+          />
+        )}
+        <SummaryGenerateButton
+          currentTemplateId={detail.meeting.notes_template_id}
+          hasTranscript={hasTranscript}
+          isBusy={isBusy || (hasTranscript && askMode && chosenModel === null)}
+          onPick={(templateId) => {
+            // Mirror notes-view: only the no-transcript path triggers diarize
+            // and therefore the speaker prompt; regenerating notes is purely
+            // a re-run of the LLM step.
+            if (hasTranscript) {
+              void (async () => {
+                await window.scribe.templates.setMeetingTemplate(
+                  detail.meeting.id,
+                  templateId,
+                );
+                await generate(detail.meeting.id, chosenModel ?? undefined);
+              })();
+            } else {
+              openSpeakerPrompt(detail.meeting.id, {
+                kind: "process",
+                templateId,
+              });
+            }
+          }}
+        />
       </div>
     );
   }
@@ -106,9 +138,13 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
       lines.push("", "# Decisions");
       for (const d of summary.decisions) lines.push(`• ${d}`);
     }
-    await navigator.clipboard.writeText(lines.join("\n"));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      reportError(t("common.copyFailed"));
+    }
   }
 
   return (
@@ -120,21 +156,23 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
           className="-ml-2 w-fit gap-1.5 text-muted-foreground hover:text-foreground"
         >
           <HugeiconsIcon icon={Copy01Icon} className="size-3.5" />
-          {copied ? "Copied!" : "Copy full summary"}
+          {copied ? t("summary.copied") : t("summary.copy")}
         </Button>
 
         {summary.executive_summary.length > 0 && (
           <section className="flex flex-col gap-3">
-            <SectionHeading title="Executive summary" />
+            <SectionHeading title={t("summary.exec")} />
             <ul className="flex flex-col gap-3">
               {summary.executive_summary.map((b, i) => (
                 <li key={i} className="flex gap-2.5">
                   <span className="mt-2 inline-block size-1 shrink-0 rounded-full bg-foreground/60" />
-                  <p className="text-sm leading-relaxed">
+                  <div className="text-sm leading-relaxed">
                     <span className="font-semibold">{b.topic}</span>
                     <span className="text-muted-foreground"> · </span>
-                    <span>{b.detail}</span>
-                  </p>
+                    <Markdown inline className="inline">
+                      {b.detail}
+                    </Markdown>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -142,17 +180,21 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
         )}
 
         <section className="flex flex-col gap-3">
-          <SectionHeading title="Overview" />
-          <p className="text-[15px] leading-relaxed text-foreground/95">
+          <SectionHeading title={t("summary.overview")} />
+          <Markdown className="text-[15px] leading-relaxed text-foreground/95">
             {summary.full_summary}
-          </p>
+          </Markdown>
         </section>
 
         {sections.length > 0 && (
           <section className="flex flex-col gap-5">
             <SectionHeading
-              title="In depth"
-              hint={`${sections.length} ${sections.length === 1 ? "topic" : "topics"}`}
+              title={t("summary.inDepth")}
+              hint={
+                sections.length === 1
+                  ? t("summary.topicOne", { count: sections.length })
+                  : t("summary.topicMany", { count: sections.length })
+              }
             />
             <div className="flex flex-col gap-6">
               {sections.map((s, i) => (
@@ -163,9 +205,9 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
                   <h3 className="text-base font-semibold tracking-tight">
                     {s.title}
                   </h3>
-                  <p className="text-[14px] leading-relaxed text-foreground/90 whitespace-pre-line">
+                  <Markdown className="text-[14px] leading-relaxed text-foreground/90">
                     {s.content}
-                  </p>
+                  </Markdown>
                 </article>
               ))}
             </div>
@@ -174,18 +216,69 @@ export function SummaryView({ detail }: { detail: MeetingDetail }) {
 
         {summary.decisions.length > 0 && (
           <section className="flex flex-col gap-3">
-            <SectionHeading title="Decisions" />
+            <SectionHeading title={t("summary.decisions")} />
             <ul className="flex flex-col gap-1.5">
               {summary.decisions.map((d, i) => (
                 <li key={i} className="flex gap-2.5 text-sm leading-snug">
                   <span className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-foreground/60" />
-                  {d}
+                  <Markdown inline>{d}</Markdown>
                 </li>
               ))}
             </ul>
           </section>
         )}
       </div>
+  );
+}
+
+function SummaryGenerateButton({
+  currentTemplateId,
+  hasTranscript,
+  isBusy,
+  onPick,
+}: {
+  currentTemplateId: string | null;
+  hasTranscript: boolean;
+  isBusy: boolean;
+  onPick: (templateId: string) => void;
+}) {
+  const t = useT();
+  const { templates, defaultId } = useTemplatesList();
+  const selectedId = currentTemplateId ?? defaultId;
+  const label = isBusy
+    ? t("summary.processing")
+    : hasTranscript
+      ? t("summary.generateNotes")
+      : t("summary.processMeeting");
+
+  if (!templates) {
+    return (
+      <Button size="sm" className="mt-2 gap-1.5" disabled={isBusy}>
+        <HugeiconsIcon icon={SparklesIcon} className="size-3.5" />
+        {label}
+      </Button>
+    );
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={(props) => (
+          <Button {...props} size="sm" className="mt-2 gap-1.5" disabled={isBusy}>
+            <HugeiconsIcon icon={SparklesIcon} className="size-3.5" />
+            {label}
+            <HugeiconsIcon icon={ArrowDown01Icon} className="size-3" />
+          </Button>
+        )}
+      />
+      <DropdownMenuContent align="center">
+        <TemplateMenuItems
+          templates={templates}
+          selectedId={selectedId}
+          onPick={onPick}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

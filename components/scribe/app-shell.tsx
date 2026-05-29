@@ -7,6 +7,8 @@ import { MeetingView } from "./meeting-view";
 import { TasksView } from "./tasks-view";
 import { RecordingBar } from "./recording-bar";
 import { TopBar } from "./top-bar";
+import { CommandPalette } from "./command-palette";
+import { FindBar } from "./find-bar";
 import { useScribe } from "@/lib/store";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -15,6 +17,7 @@ import {
   UserCheck01Icon,
 } from "@hugeicons/core-free-icons";
 import type { AutoLinkToastState } from "@/lib/store";
+import { I18nProvider, useT } from "@/lib/i18n";
 
 // CalendarView and SettingsView are large (calendar grid + ~1400 LoC of
 // settings) and not on the meeting hot path. Lazy them out of the initial
@@ -30,9 +33,10 @@ const PeopleView = lazy(() =>
 );
 
 function LazyViewFallback() {
+  const t = useT();
   return (
     <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-      Loading…
+      {t("view.loading")}
     </div>
   );
 }
@@ -51,19 +55,21 @@ export function AppShell() {
   const noop = useCallback(() => {}, []);
 
   return (
-    <SidebarProvider
-      open
-      onOpenChange={noop}
-      style={
-        {
-          "--sidebar-width": `${sidebarWidth}px`,
-          "--sidebar-width-icon": "3rem",
-        } as React.CSSProperties
-      }
-      className="h-screen w-screen overflow-hidden"
-    >
-      <AppShellInner />
-    </SidebarProvider>
+    <I18nProvider>
+      <SidebarProvider
+        open
+        onOpenChange={noop}
+        style={
+          {
+            "--sidebar-width": `${sidebarWidth}px`,
+            "--sidebar-width-icon": "3rem",
+          } as React.CSSProperties
+        }
+        className="h-screen w-screen overflow-hidden"
+      >
+        <AppShellInner />
+      </SidebarProvider>
+    </I18nProvider>
   );
 }
 
@@ -73,6 +79,7 @@ function AppShellInner() {
   const activeSection = useScribe((s) => s.activeSection);
 
   useGlobalShortcuts();
+  useSmartAutoRefresh();
 
   return (
     <div className="relative flex h-full w-full">
@@ -100,8 +107,62 @@ function AppShellInner() {
       </SidebarInset>
 
       <RecordingBar />
+      <CommandPalette />
+      <FindBar />
       {error && <ErrorToast message={error} onDismiss={clearError} />}
       <AutoLinkToast />
+      <SystemAudioNotice />
+    </div>
+  );
+}
+
+function SystemAudioNotice() {
+  const t = useT();
+  const show = useScribe((s) => s.systemAudioNotice);
+  const dismiss = useScribe((s) => s.dismissSystemAudioNotice);
+  const openSettings = useScribe((s) => s.openScreenRecordingSettings);
+  if (!show) return null;
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      // top-32 sits below the error/auto-link toasts so it doesn't overlap when
+      // more than one is visible during a recording.
+      className="pointer-events-auto absolute right-4 top-32 z-50 w-[min(28rem,calc(100vw-2rem))] animate-in fade-in-0 slide-in-from-top-2 duration-150"
+    >
+      <div className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-card/95 p-3 pr-2 shadow-2xl ring-1 ring-black/5 backdrop-blur-md">
+        <div
+          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400"
+          aria-hidden
+        >
+          <HugeiconsIcon icon={AlertCircleIcon} className="size-4" />
+        </div>
+
+        <div className="min-w-0 flex-1 pt-0.5">
+          <div className="text-sm font-semibold leading-tight text-foreground">
+            {t("toast.systemAudioTitle")}
+          </div>
+          <div className="mt-1 break-words text-xs leading-snug text-muted-foreground">
+            {t("toast.systemAudioBody")}
+          </div>
+          <button
+            type="button"
+            onClick={openSettings}
+            className="mt-1.5 text-xs font-medium text-primary underline-offset-2 hover:underline"
+          >
+            {t("toast.openScreenSettings")}
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={dismiss}
+          aria-label={t("common.dismiss")}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -134,6 +195,7 @@ function AutoLinkToastView({
   onDismiss: () => void;
   onReview: () => void;
 }) {
+  const t = useT();
   const timerRef = useRef<number | null>(null);
   const clear = useCallback(() => {
     if (timerRef.current != null) {
@@ -152,16 +214,18 @@ function AutoLinkToastView({
 
   const names = toast.autoLinked.map((a) => a.displayName);
   const namesText =
-    names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+    names.length <= 2
+      ? names.join(", ")
+      : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
   const headline =
     toast.autoLinked.length === 1
-      ? "Auto-linked 1 speaker"
-      : `Auto-linked ${toast.autoLinked.length} speakers`;
+      ? t("toast.autoLinkedOne")
+      : t("toast.autoLinkedMany", { count: toast.autoLinked.length });
   const reviewSuffix =
     toast.needsReviewCount > 0
-      ? ` · ${toast.needsReviewCount} need${
-          toast.needsReviewCount === 1 ? "s" : ""
-        } review`
+      ? toast.needsReviewCount === 1
+        ? t("toast.needsReviewSuffixOne")
+        : t("toast.needsReviewSuffix", { count: toast.needsReviewCount })
       : "";
   return (
     <div
@@ -187,21 +251,21 @@ function AutoLinkToastView({
             {reviewSuffix}
           </div>
           <div className="mt-1 break-words text-xs leading-snug text-muted-foreground">
-            {namesText} from your voice library.
+            {t("toast.autoLinkedDetail", { names: namesText })}
           </div>
           <button
             type="button"
             onClick={onReview}
             className="mt-1.5 text-xs font-medium text-primary underline-offset-2 hover:underline"
           >
-            Review in People
+            {t("toast.reviewInPeople")}
           </button>
         </div>
 
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="Dismiss"
+          aria-label={t("common.dismiss")}
           className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
@@ -209,6 +273,52 @@ function AutoLinkToastView({
       </div>
     </div>
   );
+}
+
+/**
+ * "Smart resync" — refresh the active view whenever the Scribe window regains
+ * focus or the document becomes visible again. Covers the common case where
+ * the user switched to another app (Cursor, Claude Code, the MCP tool) to
+ * mutate Scribe's data and then comes back expecting to see the change,
+ * without having to hit the refresh button by hand.
+ *
+ * Guards:
+ *   - Throttled to once per 10s so focus storms (alt-tab dance) don't pile
+ *     up redundant DB reads.
+ *   - Skipped while a recording is in progress (selectMeeting would clobber
+ *     the live `detail` mid-capture).
+ *   - Skipped if a refresh is already in flight (refreshActiveView early-
+ *     returns anyway; checked here too to avoid mutating the throttle clock
+ *     for a call we know is a no-op).
+ *   - Skipped while the document is hidden — visibilitychange fires once
+ *     when the user comes back, which is the moment we actually want.
+ */
+const SMART_REFRESH_THROTTLE_MS = 10_000;
+
+function useSmartAutoRefresh() {
+  const refresh = useScribe((s) => s.refreshActiveView);
+  useEffect(() => {
+    let lastAt = 0;
+    const maybeRefresh = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      const st = useScribe.getState();
+      if (st.recording.kind === "recording" || st.refreshing) return;
+      const now = Date.now();
+      if (now - lastAt < SMART_REFRESH_THROTTLE_MS) return;
+      lastAt = now;
+      void refresh();
+    };
+    const onFocus = () => maybeRefresh();
+    const onVisibility = () => {
+      if (!document.hidden) maybeRefresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
 }
 
 function useGlobalShortcuts() {
@@ -228,6 +338,23 @@ function useGlobalShortcuts() {
       if (e.key === "Escape" && s.error) {
         e.preventDefault();
         s.clearError();
+        return;
+      }
+
+      // Cmd/Ctrl+K toggles the command palette — even when an input has
+      // focus, so it works while typing in the meeting title, tag chip, etc.
+      if (mod && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        s.togglePalette();
+        return;
+      }
+
+      // Cmd/Ctrl+F opens (or refocuses) the find-in-page bar. Like Cmd+K it
+      // bypasses isTypingTarget so the user can trigger it while the title
+      // input or a transcript edit field has focus.
+      if (mod && !e.shiftKey && !e.altKey && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        s.openFind();
         return;
       }
 
@@ -279,6 +406,7 @@ function ErrorToast({
   message: string;
   onDismiss: () => void;
 }) {
+  const t = useT();
   const timerRef = useRef<number | null>(null);
 
   const clear = useCallback(() => {
@@ -320,7 +448,7 @@ function ErrorToast({
 
         <div className="min-w-0 flex-1 pt-0.5">
           <div className="text-sm font-semibold leading-tight text-foreground">
-            Something went wrong
+            {t("toast.errorTitle")}
           </div>
           <div className="mt-1 break-words text-xs leading-snug text-muted-foreground">
             {message}
@@ -330,7 +458,7 @@ function ErrorToast({
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="Dismiss error"
+          aria-label={t("toast.dismissError")}
           className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />

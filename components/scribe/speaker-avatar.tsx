@@ -41,7 +41,11 @@ export function SpeakerAvatarStack({
   max = 3,
   size = "sm",
 }: {
-  speakers: Array<{ speaker_id: string; display_name: string }>;
+  speakers: Array<{
+    speaker_id: string;
+    display_name: string;
+    voice_library_id?: string | null;
+  }>;
   max?: number;
   size?: "sm" | "md";
 }) {
@@ -52,7 +56,7 @@ export function SpeakerAvatarStack({
       {shown.map((s) => (
         <SpeakerAvatar
           key={s.speaker_id}
-          speakerId={s.speaker_id}
+          speakerId={s.voice_library_id ?? s.speaker_id}
           displayName={s.display_name}
           size={size}
         />

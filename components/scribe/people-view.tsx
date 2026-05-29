@@ -1,22 +1,42 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+} from "react";
 import type { VoiceLibraryPerson } from "@/lib/scribe-global";
 import { useScribe } from "@/lib/store";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { SpeakerAvatar } from "./speaker-avatar";
 import { SampleAudioButton } from "./sample-audio-button";
+import { useT, type TranslateFn } from "@/lib/i18n";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Delete02Icon,
   PencilEdit01Icon,
+  UserCheck01Icon,
   UserMultipleIcon,
 } from "@hugeicons/core-free-icons";
 
 export function PeopleView() {
+  const t = useT();
+  const refreshTick = useScribe((s) => s.refreshTick);
   const [people, setPeople] = useState<VoiceLibraryPerson[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -33,8 +53,22 @@ export function PeopleView() {
     }
   }, []);
 
+  // refreshTick is in the dep array so the global top-bar refresh button
+  // re-pulls the voice library even though this view owns its own fetch.
   useEffect(() => {
     void refresh();
+  }, [refresh, refreshTick]);
+
+  // Refetch whenever the main process tells us the voice library changed —
+  // new entries from speaker assignments, renames, deletes, or post-process
+  // matching after a transcription run. Without this, opening the People
+  // tab once and assigning speakers from a meeting later would leave the
+  // list stale until the user navigated away and back.
+  useEffect(() => {
+    const unsub = window.scribe.voice.onLibraryChanged(() => {
+      void refresh();
+    });
+    return unsub;
   }, [refresh]);
 
   return (
@@ -42,17 +76,20 @@ export function PeopleView() {
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto w-full max-w-3xl px-8 pt-10 pb-12">
           <header className="mb-6 flex items-baseline justify-between gap-3">
-            <h1 className="text-2xl font-bold tracking-tight">People</h1>
+            <h1 className="text-2xl font-bold tracking-tight">
+              {t("people.title")}
+            </h1>
             <span className="text-sm text-muted-foreground">
-              {loading ? "Loading…" : `${people.length} voice${people.length === 1 ? "" : "s"}`}
+              {loading
+                ? t("common.loading")
+                : people.length === 1
+                  ? t("people.countOne")
+                  : t("people.countMany", { count: people.length })}
             </span>
           </header>
 
           <p className="mb-6 max-w-prose text-sm text-muted-foreground">
-            Voices Scribe has learned across your meetings. After each
-            transcription, new speakers above the auto-link threshold are
-            silently linked to entries here; borderline matches surface a
-            review banner on the meeting itself.
+            {t("settings.voice.desc")}
           </p>
 
           {!loading && people.length === 0 && <EmptyState />}
@@ -71,16 +108,15 @@ export function PeopleView() {
 }
 
 function EmptyState() {
+  const t = useT();
   return (
     <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed bg-card/40 px-6 py-12 text-center">
       <div className="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
         <HugeiconsIcon icon={UserMultipleIcon} className="size-5" />
       </div>
-      <div className="text-sm font-medium">No voices yet</div>
+      <div className="text-sm font-medium">{t("people.empty.title")}</div>
       <div className="max-w-sm text-xs text-muted-foreground">
-        Run a meeting through transcription with diarization enabled. Each new
-        speaker you tag will appear here and be recognized automatically next
-        time.
+        {t("settings.voice.empty")}
       </div>
     </div>
   );
@@ -93,13 +129,17 @@ function PersonRow({
   person: VoiceLibraryPerson;
   onChanged: () => Promise<void> | void;
 }) {
+  const t = useT();
   const selectMeeting = useScribe((s) => s.selectMeeting);
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(person.display_name);
+  const [draftEmail, setDraftEmail] = useState(person.email ?? "");
   const [lastSyncedName, setLastSyncedName] = useState(person.display_name);
+  const [lastSyncedEmail, setLastSyncedEmail] = useState(person.email ?? "");
   const [acting, setActing] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Sync the draft back to the canonical name when the upstream row changes
+  // Sync the drafts back to the canonical values when the upstream row changes
   // underneath us (e.g. a transcription run merges an embedding and refreshes
   // the list). Render-phase reconciliation mirrors the React docs pattern —
   // avoids the cascading-render hit of a useEffect.
@@ -107,17 +147,37 @@ function PersonRow({
     setLastSyncedName(person.display_name);
     setDraftName(person.display_name);
   }
+  if (!editing && lastSyncedEmail !== (person.email ?? "")) {
+    setLastSyncedEmail(person.email ?? "");
+    setDraftEmail(person.email ?? "");
+  }
 
-  async function commitRename() {
-    const next = draftName.trim();
-    if (!next || next === person.display_name) {
+  function resetDrafts() {
+    setDraftName(person.display_name);
+    setDraftEmail(person.email ?? "");
+  }
+
+  // Save name and/or email in one go — only the fields that actually changed.
+  // An emptied email clears it (setLibraryEmail(null)); a blank name is ignored.
+  async function commitEdit() {
+    const nextName = draftName.trim();
+    const nextEmail = draftEmail.trim().toLowerCase();
+    const curEmail = (person.email ?? "").toLowerCase();
+    const nameChanged = !!nextName && nextName !== person.display_name;
+    const emailChanged = nextEmail !== curEmail;
+    if (!nameChanged && !emailChanged) {
+      resetDrafts();
       setEditing(false);
-      setDraftName(person.display_name);
       return;
     }
     setActing(true);
     try {
-      await window.scribe.voice.renameLibraryEntry(person.id, next);
+      if (nameChanged) {
+        await window.scribe.voice.renameLibraryEntry(person.id, nextName);
+      }
+      if (emailChanged) {
+        await window.scribe.voice.setLibraryEmail(person.id, nextEmail || null);
+      }
       await onChanged();
     } finally {
       setActing(false);
@@ -125,20 +185,43 @@ function PersonRow({
     }
   }
 
+  // Commit when focus leaves the whole edit cluster (so tabbing name→email
+  // doesn't save prematurely); cancel on Escape; Enter commits by blurring out.
+  function onEditBlur(e: FocusEvent<HTMLDivElement>) {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) void commitEdit();
+  }
+  function onEditKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+    if (e.key === "Escape") {
+      resetDrafts();
+      setEditing(false);
+    }
+  }
+
   async function remove() {
-    // Skipping a confirm dialog here — voice-library entries can be rebuilt
-    // by re-tagging in the next meeting, so the destruction cost is low.
-    // Add one if usage shows accidental deletes happen often.
     setActing(true);
     try {
       await window.scribe.voice.deleteLibraryEntry(person.id);
       await onChanged();
     } finally {
       setActing(false);
+      setConfirmOpen(false);
     }
   }
 
-  const subtitle = subtitleFor(person);
+  // Toggle this person as "you". Setting clears any previous one (enforced in
+  // the main process); clicking again on the current "you" unsets it.
+  async function toggleMe() {
+    setActing(true);
+    try {
+      await window.scribe.voice.setMe(person.is_me ? null : person.id);
+      await onChanged();
+    } finally {
+      setActing(false);
+    }
+  }
+
+  const subtitle = subtitleFor(person, t);
 
   return (
     <li className="group flex items-center gap-3 rounded-md border bg-card/40 px-3 py-2.5 transition-colors hover:bg-card">
@@ -149,27 +232,47 @@ function PersonRow({
       />
       <div className="min-w-0 flex-1">
         {editing ? (
-          <Input
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            onBlur={() => void commitRename()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-              if (e.key === "Escape") {
-                setDraftName(person.display_name);
-                setEditing(false);
-              }
-            }}
-            disabled={acting}
-            autoFocus
-            className="h-7 text-sm"
-          />
-        ) : (
-          <div className="truncate text-sm font-medium">
-            {person.display_name}
+          <div className="flex flex-col gap-1" onBlur={onEditBlur}>
+            <Input
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onKeyDown={onEditKeyDown}
+              disabled={acting}
+              autoFocus
+              aria-label={t("common.rename")}
+              className="h-7 text-sm"
+            />
+            <Input
+              type="email"
+              value={draftEmail}
+              onChange={(e) => setDraftEmail(e.target.value)}
+              onKeyDown={onEditKeyDown}
+              disabled={acting}
+              placeholder="email@example.com"
+              aria-label={t("common.email")}
+              className="h-7 text-xs"
+            />
           </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm font-medium">
+                {person.display_name}
+              </span>
+              {person.is_me === 1 && (
+                <Badge
+                  variant="secondary"
+                  className="shrink-0 px-1.5 py-0 text-[10px] font-medium"
+                >
+                  {t("people.you")}
+                </Badge>
+              )}
+            </div>
+            <div className="truncate text-xs text-muted-foreground">
+              {subtitle}
+            </div>
+          </>
         )}
-        <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
       </div>
 
       <SampleAudioButton filePath={person.sample_clip_path} />
@@ -181,50 +284,109 @@ function PersonRow({
           onClick={() => {
             void selectMeeting(person.last_meeting_id!);
           }}
-          className="hidden text-xs group-hover:inline-flex"
+          className="hidden text-xs group-hover:inline-flex group-focus-within:inline-flex"
           title={
             person.last_meeting_title
-              ? `Open "${person.last_meeting_title}"`
-              : "Open last meeting"
+              ? `${t("tasks.openMeeting")} — ${person.last_meeting_title}`
+              : t("people.openLastMeeting")
           }
         >
-          Open
+          {t("tasks.openMeeting")}
         </Button>
       )}
 
-      <IconBtn
-        icon={PencilEdit01Icon}
-        label="Rename"
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        onClick={() => void toggleMe()}
+        disabled={acting}
+        title={person.is_me ? t("people.unmarkMe") : t("people.markAsMe")}
+        aria-label={person.is_me ? t("people.unmarkMe") : t("people.markAsMe")}
+        aria-pressed={person.is_me === 1}
+        className={cn(
+          "hidden group-hover:inline-flex group-focus-within:inline-flex",
+          person.is_me === 1 &&
+            "inline-flex bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+        )}
+      >
+        <HugeiconsIcon icon={UserCheck01Icon} />
+      </Button>
+      <Button
+        size="icon-xs"
+        variant="ghost"
         onClick={() => setEditing(true)}
         disabled={acting || editing}
-      />
-      <IconBtn
-        icon={Delete02Icon}
-        label="Delete"
-        onClick={() => void remove()}
-        disabled={acting}
-        destructive
-      />
+        title={t("common.rename")}
+        aria-label={t("common.rename")}
+      >
+        <HugeiconsIcon icon={PencilEdit01Icon} />
+      </Button>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogTrigger
+          render={(props) => (
+            <Button
+              {...props}
+              size="icon-xs"
+              variant="ghost"
+              disabled={acting}
+              title={t("common.delete")}
+              aria-label={t("common.delete")}
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            >
+              <HugeiconsIcon icon={Delete02Icon} />
+            </Button>
+          )}
+        />
+        <DialogContent showCloseButton={false} className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("people.delete.title")}</DialogTitle>
+            <DialogDescription>
+              {t("people.delete.body", { name: person.display_name })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmOpen(false)}
+              disabled={acting}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void remove()}
+              disabled={acting}
+            >
+              {t("common.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </li>
   );
 }
 
-function subtitleFor(p: VoiceLibraryPerson): string {
+function subtitleFor(p: VoiceLibraryPerson, t: TranslateFn): string {
   const heardBits: string[] = [];
-  heardBits.push(`Heard in ${p.n_meetings} meeting${p.n_meetings === 1 ? "" : "s"}`);
+  if (p.email) heardBits.push(p.email);
+  heardBits.push(
+    p.n_meetings === 1
+      ? t("people.heardInOne")
+      : t("people.heardInMany", { count: p.n_meetings }),
+  );
   if (p.last_heard_ms != null) {
-    heardBits.push(`last on ${formatRelative(p.last_heard_ms)}`);
+    heardBits.push(t("people.lastOn", { date: formatRelative(p.last_heard_ms, t) }));
   }
   return heardBits.join(" · ");
 }
 
-function formatRelative(ms: number): string {
+function formatRelative(ms: number, t: TranslateFn): string {
   const now = Date.now();
   const diff = now - ms;
   const day = 24 * 60 * 60 * 1000;
-  if (diff < day) return "today";
-  if (diff < 2 * day) return "yesterday";
-  if (diff < 7 * day) return `${Math.floor(diff / day)} days ago`;
+  if (diff < day) return t("calendar.today");
+  if (diff < 2 * day) return t("calendar.yesterday");
+  if (diff < 7 * day) return t("time.daysAgo", { count: Math.floor(diff / day) });
   return new Date(ms).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
@@ -232,35 +394,4 @@ function formatRelative(ms: number): string {
   });
 }
 
-function IconBtn({
-  icon,
-  label,
-  onClick,
-  disabled,
-  destructive,
-}: {
-  icon: typeof PencilEdit01Icon;
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  destructive?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={label}
-      aria-label={label}
-      className={cn(
-        "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors disabled:opacity-50",
-        destructive
-          ? "hover:bg-destructive/10 hover:text-destructive"
-          : "hover:bg-accent hover:text-foreground",
-      )}
-    >
-      <HugeiconsIcon icon={icon} className="size-3.5" />
-    </button>
-  );
-}
 

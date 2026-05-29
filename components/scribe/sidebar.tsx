@@ -14,6 +14,7 @@ import {
   useScribe,
 } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Calendar03Icon,
@@ -25,11 +26,14 @@ import {
 import { TreeView } from "./tree/tree-view";
 import { PinnedSection } from "./tree/pinned-section";
 import { TagsSection } from "./tags-section";
+import { Wordmark } from "./wordmark";
 
 export function ScribeSidebar() {
   const createFolder = useScribe((s) => s.createFolder);
   const activeSection = useScribe((s) => s.activeSection);
+  const previousSection = useScribe((s) => s.previousSection);
   const setActiveSection = useScribe((s) => s.setActiveSection);
+  const t = useT();
 
   return (
     <ShadSidebar collapsible="offcanvas" variant="sidebar">
@@ -49,12 +53,12 @@ export function ScribeSidebar() {
 
         <div className="flex shrink-0 items-center justify-between gap-1 px-4 pb-1.5 pt-1">
           <div className="text-[11px] font-medium uppercase tracking-wider text-sidebar-foreground/60">
-            Meetings
+            {t("nav.meetings")}
           </div>
           <button
             type="button"
             onClick={() => void createFolder(null)}
-            title="New folder"
+            title={t("nav.newFolder")}
             className="inline-flex size-5 items-center justify-center rounded text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           >
             <HugeiconsIcon icon={FolderAddIcon} className="size-3.5" />
@@ -66,12 +70,17 @@ export function ScribeSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="border-t p-2">
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-between">
+          <Wordmark className="pl-1 text-[15px] leading-none text-sidebar-foreground" />
           <button
             type="button"
-            onClick={() => setActiveSection("settings")}
-            title="Settings"
-            aria-label="Open settings"
+            onClick={() =>
+              setActiveSection(
+                activeSection === "settings" ? previousSection : "settings",
+              )
+            }
+            title={t("nav.settings")}
+            aria-label={t("nav.openSettings")}
             aria-pressed={activeSection === "settings"}
             className={cn(
               "inline-flex size-7 items-center justify-center rounded-md transition-colors",
@@ -97,14 +106,15 @@ function SectionNav({
   active: SidebarSection;
   onChange: (s: SidebarSection) => void;
 }) {
+  const t = useT();
   const items: Array<{
     id: Exclude<SidebarSection, "meetings">;
     label: string;
     icon: typeof TaskDone01Icon;
   }> = [
-    { id: "tasks", label: "Tasks", icon: TaskDone01Icon },
-    { id: "calendar", label: "Calendar", icon: Calendar03Icon },
-    { id: "people", label: "People", icon: UserMultipleIcon },
+    { id: "tasks", label: t("nav.tasks"), icon: TaskDone01Icon },
+    { id: "calendar", label: t("nav.calendar"), icon: Calendar03Icon },
+    { id: "people", label: t("nav.people"), icon: UserMultipleIcon },
   ];
   return (
     <nav className="flex flex-col gap-px px-2 pb-2 pt-1">
@@ -121,7 +131,7 @@ function SectionNav({
                 ? "bg-sidebar-accent text-sidebar-foreground font-medium"
                 : "text-sidebar-foreground/75 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
             )}
-            aria-pressed={isActive}
+            aria-current={isActive ? "page" : undefined}
           >
             <HugeiconsIcon
               icon={it.icon}
@@ -142,6 +152,7 @@ function SidebarResizer() {
   const sidebarWidth = useScribe((s) => s.sidebarWidth);
   const setSidebarWidth = useScribe((s) => s.setSidebarWidth);
   const persistSidebarWidth = useScribe((s) => s.persistSidebarWidth);
+  const t = useT();
   const [dragging, setDragging] = useState(false);
   const startRef = useRef<{ x: number; w: number } | null>(null);
   // rAF coalescing — at most one width update per animation frame even if
@@ -214,7 +225,11 @@ function SidebarResizer() {
   return (
     <button
       type="button"
-      aria-label={`Resize sidebar (current ${sidebarWidth}px, min ${SIDEBAR_MIN_WIDTH}, max ${SIDEBAR_MAX_WIDTH})`}
+      aria-label={t("sidebar.resize", {
+        width: sidebarWidth,
+        min: SIDEBAR_MIN_WIDTH,
+        max: SIDEBAR_MAX_WIDTH,
+      })}
       onMouseDown={onMouseDown}
       onDoubleClick={() => {
         setSidebarWidth(288);

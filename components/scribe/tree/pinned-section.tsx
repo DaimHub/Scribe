@@ -17,6 +17,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useMemo, useState } from "react";
 import { useScribe, formatDuration } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { MeetingRow, MeetingStatus } from "@/lib/scribe-global";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -58,6 +59,7 @@ function saveOrder(ids: string[]) {
 
 export function PinnedSection() {
   const meetings = useScribe((s) => s.meetings);
+  const t = useT();
   const [order, setOrder] = useState<string[]>(() => loadOrder());
 
   const pinned = useMemo(() => {
@@ -98,7 +100,7 @@ export function PinnedSection() {
     <>
       <div className="flex items-center gap-1.5 px-4 pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <HugeiconsIcon icon={PinIcon} className="size-3" />
-        Pinned
+        {t("pinned.heading")}
       </div>
       <DndContext
         sensors={sensors}
@@ -125,6 +127,7 @@ function PinnedItem({ meeting }: { meeting: MeetingRow }) {
   const selectedId = useScribe((s) => s.selectedId);
   const select = useScribe((s) => s.selectMeeting);
   const setPinned = useScribe((s) => s.setPinned);
+  const t = useT();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: meeting.id });
 
@@ -167,12 +170,12 @@ function PinnedItem({ meeting }: { meeting: MeetingRow }) {
             e.stopPropagation();
             void setPinned(meeting.id, false);
           }}
-          aria-label="Unpin"
+          aria-label={t("tree.unpin")}
           className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"
         >
           <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
         </TooltipTrigger>
-        <TooltipContent>Unpin</TooltipContent>
+        <TooltipContent>{t("tree.unpin")}</TooltipContent>
       </Tooltip>
     </li>
   );

@@ -35,9 +35,15 @@ extraResources:
   - from: python
     to: python
     filter: ["**/*.py"]
+  - from: mcp-server/dist/mcp-server.mjs
+    to: mcp-server.mjs
+  - from: mcp-server/skills
+    to: skills
+    filter: ["**/*"]
 
 mac:
   category: public.app-category.productivity
+  icon: build/icon.icns
   identity: null
   target:
     - target: dmg

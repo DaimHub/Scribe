@@ -1,5 +1,15 @@
 export type AudioChannel = "mic" | "system";
 
+export type ScreenAccessStatus =
+  | "not-determined"
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "unknown";
+
+export type DisplayLanguage = "en" | "fr" | "es" | "de";
+export type AiLanguage = "auto" | "en" | "fr" | "es" | "de";
+
 export type MeetingStatus =
   | "recording"
   | "recorded"
@@ -23,6 +33,12 @@ export interface MeetingRow {
   position: number;
   pinned: 0 | 1;
   pipeline_json: string | null;
+  notes_template_id: string | null;
+  /** Condensed "key points": JSON array of bullet strings (inline markdown
+   *  allowed). Produced by the notes LLM pass; null = not generated. */
+  bullets_json: string | null;
+  /** Free-form user scratch pad (markdown text). User-owned. */
+  scratchpad: string | null;
 }
 
 export interface Pipeline {
@@ -30,6 +46,37 @@ export interface Pipeline {
   align?: string;
   diarize?: string;
   notes?: string;
+  notes_template_id?: string;
+  notes_template_name?: string;
+  notes_usage?: {
+    cost_usd?: number;
+    model?: string;
+    session_id?: string;
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    duration_ms?: number;
+    num_turns?: number;
+    billing_kind?: "subscription" | "metered";
+    tools_used?: Array<{ name: string; target?: string }>;
+    calls?: Array<{
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+      tools_used?: Array<{ name: string; target?: string }>;
+    }>;
+  };
+}
+
+export interface NotesTemplate {
+  id: string;
+  name: string;
+  instructions: string;
+  /** True for the shipped templates (builtin:*). Builtins cannot be
+   *  deleted but their instructions can be overridden and reset. */
+  builtin: boolean;
 }
 
 export interface FolderRow {
@@ -95,6 +142,9 @@ export interface SpeakerRow {
 export interface VoiceLibraryRow {
   id: string;
   display_name: string;
+  email: string | null;
+  /** 1 for the single person representing the app user ("you"), else 0. */
+  is_me: 0 | 1;
   dim: number;
   sample_clip_path: string | null;
   n_meetings: number;
@@ -125,6 +175,8 @@ export interface PendingReviewSpeaker {
   display_name: string;
   sample_clip_path: string | null;
   match_confidence: number | null;
+  voice_library_id: string | null;
+  email: string | null;
   candidates: Array<{
     library_id: string;
     display_name: string;
@@ -138,6 +190,9 @@ export interface TaskRow {
   assignee_speaker_id: string | null;
   text: string;
   done: 0 | 1;
+  /** 0 = none, 1 = low, 2 = medium, 3 = high. */
+  priority: number;
+  due_at_ms: number | null;
   created_at_ms: number;
 }
 
@@ -145,6 +200,7 @@ export interface AggregatedTaskRow extends TaskRow {
   meeting_title: string;
   meeting_started_at_ms: number;
   assignee_name: string | null;
+  assignee_library_id: string | null;
 }
 
 export interface PersonalTaskRow {
@@ -244,12 +300,15 @@ export interface ScribeAPI {
       sampleRate: number,
       samples: ArrayBuffer,
     ): void;
+    getScreenAccessStatus(): Promise<ScreenAccessStatus>;
+    openScreenSettings(): Promise<void>;
   };
   meetings: {
     list(): Promise<MeetingRow[]>;
     get(id: string): Promise<MeetingDetail | null>;
     setTitle(id: string, title: string): Promise<MeetingRow | null>;
     setStatus(id: string, status: MeetingStatus): Promise<MeetingRow | null>;
+    setScratchpad(id: string, text: string): Promise<{ ok: boolean }>;
     delete(id: string): Promise<{ ok: boolean }>;
     setPinned(id: string, pinned: boolean): Promise<{ ok: boolean }>;
   };
@@ -279,6 +338,10 @@ export interface ScribeAPI {
     setHfToken(token: string): Promise<{ ok: boolean }>;
     getHfTokenMasked(): Promise<string | null>;
     clearHfToken(): Promise<{ ok: boolean }>;
+    getDisplayLanguage(): Promise<DisplayLanguage>;
+    setDisplayLanguage(lang: DisplayLanguage): Promise<{ ok: boolean }>;
+    getAiLanguage(): Promise<AiLanguage>;
+    setAiLanguage(lang: AiLanguage): Promise<{ ok: boolean }>;
   };
   speakers: {
     rename(
@@ -293,22 +356,34 @@ export interface ScribeAPI {
     onPostProcess(
       cb: (payload: VoicePostProcessSummary) => void,
     ): () => void;
+    onLibraryChanged(cb: () => void): () => void;
     renameLibraryEntry(
       id: string,
       displayName: string,
     ): Promise<{ ok: boolean }>;
     deleteLibraryEntry(id: string): Promise<{ ok: boolean }>;
-    pendingReview(meetingId: string): Promise<PendingReviewSpeaker[]>;
+    setLibraryEmail(
+      id: string,
+      email: string | null,
+    ): Promise<{ ok: boolean }>;
+    /** Mark a person as "you" (null clears). One person max. */
+    setMe(id: string | null): Promise<{ ok: boolean }>;
+    pendingReview(
+      meetingId: string,
+      includeReviewed?: boolean,
+    ): Promise<PendingReviewSpeaker[]>;
     assignToLibrary(
       meetingId: string,
       speakerId: string,
       libraryId: string,
       displayName: string,
+      email?: string | null,
     ): Promise<{ ok: boolean }>;
     createFromSpeaker(
       meetingId: string,
       speakerId: string,
       displayName: string,
+      email?: string | null,
     ): Promise<{ ok: boolean; libraryId: string | null }>;
     dismissReview(
       meetingId: string,
@@ -320,6 +395,23 @@ export interface ScribeAPI {
     list(meetingId: string): Promise<TaskRow[]>;
     setDone(taskId: number, done: boolean): Promise<{ ok: boolean }>;
     listAll(): Promise<AggregatedTaskRow[]>;
+    add(
+      meetingId: string,
+      text: string,
+      assigneeSpeakerId: string | null,
+    ): Promise<TaskRow>;
+    duplicate(taskId: number): Promise<TaskRow | null>;
+    delete(taskId: number): Promise<{ ok: boolean }>;
+    setPriority(taskId: number, priority: number): Promise<{ ok: boolean }>;
+    setDueDate(
+      taskId: number,
+      dueAtMs: number | null,
+    ): Promise<{ ok: boolean }>;
+    setAssignee(
+      taskId: number,
+      speakerId: string | null,
+    ): Promise<{ ok: boolean }>;
+    updateText(taskId: number, text: string): Promise<{ ok: boolean }>;
   };
   personalTasks: {
     list(): Promise<PersonalTaskRow[]>;
@@ -393,7 +485,14 @@ export interface ScribeAPI {
     listAttendees(meetingId: string): Promise<MeetingAttendee[]>;
   };
   transcribe: {
-    run(meetingId: string): Promise<{ ok: boolean; segments: number }>;
+    run(
+      meetingId: string,
+      numSpeakers?: number,
+    ): Promise<{ ok: boolean; segments: number }>;
+    rediarize(
+      meetingId: string,
+      numSpeakers?: number,
+    ): Promise<{ ok: boolean; speakers: number; segmentsTagged: number }>;
     onProgress(
       cb: (payload: {
         meetingId: string;
@@ -407,6 +506,7 @@ export interface ScribeAPI {
   llm: {
     generate(
       meetingId: string,
+      opts?: { modelOverride?: string },
     ): Promise<{
       ok: true;
       fullSummary: string;
@@ -423,6 +523,190 @@ export interface ScribeAPI {
         model?: string;
       }) => void,
     ): () => void;
+    getProviderConfig(): Promise<{
+      provider: "bundled" | "ollama" | "openai" | "anthropic" | "claude-code";
+      bundled_model: string;
+      bundled_models: readonly string[];
+      ollama_endpoint: string;
+      ollama_model: string | null;
+      openai_endpoint: string;
+      openai_model: string | null;
+      has_openai_key: boolean;
+      anthropic_endpoint: string;
+      anthropic_model: string | null;
+      has_anthropic_key: boolean;
+      claude_code_model: string;
+    }>;
+    setProvider(
+      provider:
+        | "bundled"
+        | "ollama"
+        | "openai"
+        | "anthropic"
+        | "claude-code",
+    ): Promise<{ ok: boolean }>;
+    setBundledModel(model: string): Promise<{ ok: boolean }>;
+    setOllamaConfig(opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }>;
+    setOpenAiConfig(opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }>;
+    setOpenAiKey(key: string): Promise<{ ok: boolean }>;
+    clearOpenAiKey(): Promise<{ ok: boolean }>;
+    setAnthropicConfig(opts: {
+      endpoint?: string;
+      model?: string | null;
+    }): Promise<{ ok: boolean }>;
+    setAnthropicKey(key: string): Promise<{ ok: boolean }>;
+    clearAnthropicKey(): Promise<{ ok: boolean }>;
+    getKbFilesystemPath(): Promise<string>;
+    setKbFilesystemPath(p: string): Promise<{ ok: boolean }>;
+    checkKbFilesystem(override?: string): Promise<
+      | {
+          ok: false;
+          reason: "missing" | "not_dir" | "no_access" | "empty" | "error";
+          message: string;
+        }
+      | {
+          ok: true;
+          path: string;
+          files: number;
+          truncated: boolean;
+          size_bytes: number;
+          extensions: Record<string, number>;
+          sample: string[];
+        }
+    >;
+    detectClaudeCode(): Promise<{
+      installed: boolean;
+      authed: boolean;
+      version?: string;
+      error?: string;
+    }>;
+    setClaudeCodeConfig(opts: {
+      model?: string;
+    }): Promise<{ ok: boolean }>;
+    listClaudeCodeModels(): Promise<string[]>;
+    getUsageStats(filter?: {
+      billingKind?: "subscription" | "metered";
+    }): Promise<{
+      meetings: number;
+      cost_usd: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+      duration_ms: number;
+      num_turns: number;
+      max_single_cost_usd: number;
+      last_used_at_ms: number | null;
+    }>;
+    detectOllama(endpoint?: string): Promise<{
+      running: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ name: string; size: number; modified_at: string }>;
+    }>;
+    detectOpenAi(override?: {
+      endpoint?: string;
+      apiKey?: string | null;
+    }): Promise<{
+      ok: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ id: string; owned_by?: string }>;
+    }>;
+    detectAnthropic(override?: {
+      endpoint?: string;
+      apiKey?: string | null;
+    }): Promise<{
+      ok: boolean;
+      endpoint: string;
+      error?: string;
+      models?: Array<{ id: string; display_name?: string }>;
+    }>;
+    listBundledModels(): Promise<
+      Array<{
+        id: string;
+        displayName: string;
+        approxSizeMb: number;
+        downloaded: boolean;
+        downloading?: { downloadedBytes: number; totalBytes: number | null };
+      }>
+    >;
+    downloadBundledModel(
+      model: string,
+    ): Promise<{ ok: boolean; alreadyRunning: boolean }>;
+    deleteBundledModel(model: string): Promise<{ ok: boolean }>;
+    onBundledDownloadProgress(
+      cb: (payload: {
+        model: string;
+        downloadedBytes: number;
+        totalBytes: number | null;
+      }) => void,
+    ): () => void;
+    onBundledDownloadDone(
+      cb: (payload: { model: string; ok: boolean; error?: string }) => void,
+    ): () => void;
+  };
+  templates: {
+    list(): Promise<{
+      templates: NotesTemplate[];
+      defaultId: string;
+    }>;
+    create(opts: {
+      name: string;
+      instructions: string;
+    }): Promise<NotesTemplate>;
+    update(
+      id: string,
+      patch: { name?: string; instructions?: string },
+    ): Promise<NotesTemplate>;
+    delete(id: string): Promise<{ ok: boolean }>;
+    reset(id: string): Promise<NotesTemplate>;
+    setDefault(id: string): Promise<{ ok: boolean }>;
+    setMeetingTemplate(
+      meetingId: string,
+      templateId: string | null,
+    ): Promise<{ ok: boolean }>;
+  };
+  mcp: {
+    getServerInfo(): Promise<{
+      scriptPath: string | null;
+      claudeDesktopConfigPath: string;
+      configSnippet: string;
+      requiresNode: boolean;
+      allowWrites: boolean;
+    }>;
+    setAllowWrites(allow: boolean): Promise<{ ok: boolean }>;
+    revealClaudeConfig(): Promise<{
+      ok: boolean;
+      revealed: "file" | "directory" | "none";
+      path?: string;
+    }>;
+    getSkillInfo(): Promise<{
+      status: "not-installed" | "installed" | "outdated" | "missing";
+      bundledPath: string | null;
+      installedPath: string;
+      bundledSize: number | null;
+      installedMtimeMs: number | null;
+      hasUserSection: boolean;
+    }>;
+    installSkill(): Promise<{
+      ok: boolean;
+      installedPath: string;
+      error?: string;
+      preservedUserSection?: boolean;
+      backupPath?: string;
+    }>;
+    uninstallSkill(): Promise<{ ok: boolean; error?: string }>;
+    revealInstalledSkill(): Promise<{
+      ok: boolean;
+      revealed: "file" | "parent" | "none";
+    }>;
   };
   floating: {
     publishRecordingState(snapshot: RecordingStateSnapshot): void;
@@ -447,6 +731,23 @@ export interface ScribeAPI {
       minutesUntilStart?: number;
       delaySeconds?: number;
     }): Promise<{ ok: boolean; scheduledInMs: number }>;
+  };
+  find: {
+    start(
+      query: string,
+      options?: { forward?: boolean; findNext?: boolean; matchCase?: boolean },
+    ): Promise<{ requestId: number }>;
+    stop(
+      action?: "clearSelection" | "keepSelection" | "activateSelection",
+    ): Promise<{ ok: boolean }>;
+    onResult(
+      cb: (payload: {
+        requestId: number;
+        activeMatchOrdinal: number;
+        matches: number;
+        finalUpdate: boolean;
+      }) => void,
+    ): () => void;
   };
 }
 

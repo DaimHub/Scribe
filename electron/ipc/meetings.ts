@@ -3,16 +3,24 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import { app } from "electron";
 import {
+  addTask,
   deleteMeeting,
+  deleteTask,
+  duplicateTask,
   getCalendarEventForMeeting,
   getMeeting,
   listMeetings,
   listSpeakers,
   listTasks,
   listTranscript,
+  setScratchpad,
   setStatus,
+  setTaskAssignee,
   setTaskDone,
+  setTaskDueDate,
+  setTaskPriority,
   setTitle,
+  updateTaskText,
   upsertSpeaker,
   type MeetingRow,
 } from "../services/db.js";
@@ -48,6 +56,14 @@ export function registerMeetingsIpc(): void {
     },
   );
 
+  ipcMain.handle(
+    "meetings:setScratchpad",
+    (_e, id: string, text: string): { ok: boolean } => {
+      setScratchpad(id, text);
+      return { ok: true };
+    },
+  );
+
   ipcMain.handle("meetings:delete", async (_e, id: string) => {
     const meeting = getMeeting(id);
     deleteMeeting(id);
@@ -72,6 +88,53 @@ export function registerMeetingsIpc(): void {
     "tasks:setDone",
     (_e, taskId: number, done: boolean) => {
       setTaskDone(taskId, done);
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    "tasks:add",
+    (_e, meetingId: string, text: string, assigneeSpeakerId: string | null) =>
+      addTask(meetingId, text, assigneeSpeakerId ?? null),
+  );
+
+  ipcMain.handle("tasks:duplicate", (_e, taskId: number) =>
+    duplicateTask(taskId),
+  );
+
+  ipcMain.handle("tasks:delete", (_e, taskId: number) => {
+    deleteTask(taskId);
+    return { ok: true };
+  });
+
+  ipcMain.handle(
+    "tasks:setPriority",
+    (_e, taskId: number, priority: number) => {
+      setTaskPriority(taskId, priority);
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    "tasks:setDueDate",
+    (_e, taskId: number, dueAtMs: number | null) => {
+      setTaskDueDate(taskId, dueAtMs ?? null);
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    "tasks:setAssignee",
+    (_e, taskId: number, speakerId: string | null) => {
+      setTaskAssignee(taskId, speakerId ?? null);
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    "tasks:updateText",
+    (_e, taskId: number, text: string) => {
+      updateTaskText(taskId, text);
       return { ok: true };
     },
   );

@@ -28,6 +28,17 @@ export interface MeetingRow {
   position: number;
   pinned: 0 | 1;
   pipeline_json: string | null;
+  /** Per-meeting override of the notes template. Null = use the global
+   *  default at generation time. Persisted so regeneration reuses the same
+   *  template, and so the UI can show the user's pick before generation. */
+  notes_template_id: string | null;
+  /** Condensed "key points" — a JSON array of strings (each a bullet, inline
+   *  markdown allowed). Produced by the notes LLM pass alongside the summary;
+   *  also settable via the MCP `set_bullets` tool. Null = not generated. */
+  bullets_json: string | null;
+  /** Free-form user scratch pad (plain markdown text). User-owned; never
+   *  touched by the LLM pipeline. Settable in-app and via MCP `set_scratchpad`. */
+  scratchpad: string | null;
 }
 
 export interface Pipeline {
@@ -35,6 +46,37 @@ export interface Pipeline {
   align?: string;
   diarize?: string;
   notes?: string;
+  /** Recorded after generation so the meeting header can display which
+   *  template was actually used (id for re-selection, name for the badge). */
+  notes_template_id?: string;
+  notes_template_name?: string;
+  /** Per-meeting usage report from the LLM provider — token counts, derived
+   *  cost, session id, etc. Only populated for providers that expose this
+   *  (anthropic API, claude-code CLI). */
+  notes_usage?: NotesUsage;
+}
+
+export interface NotesUsage {
+  cost_usd?: number;
+  model?: string;
+  session_id?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  duration_ms?: number;
+  num_turns?: number;
+  billing_kind?: "subscription" | "metered";
+  tools_used?: Array<{ name: string; target?: string }>;
+  calls?: NotesCallUsage[];
+}
+
+export interface NotesCallUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  tools_used?: Array<{ name: string; target?: string }>;
 }
 
 export interface FolderRow {
@@ -73,6 +115,9 @@ export interface SpeakerRow {
 export interface VoiceLibraryRow {
   id: string;
   display_name: string;
+  email: string | null;
+  /** 1 for the single person representing the app user ("you"), else 0. */
+  is_me: 0 | 1;
   dim: number;
   sample_clip_path: string | null;
   n_meetings: number;
@@ -80,8 +125,21 @@ export interface VoiceLibraryRow {
   updated_at_ms: number;
 }
 
-export interface VoiceLibraryEntry extends VoiceLibraryRow {
+/** One voice fingerprint of a person. A person may hold several (capped by
+ *  the matcher) so the same voice matches across different acoustic setups. */
+export interface PersonCentroid {
   embedding: Float32Array;
+  nSamples: number;
+}
+
+/** A library person bundled with all of its centroids — the unit the matcher
+ *  scores against (similarity = max over the person's centroids). */
+export interface PersonWithCentroids {
+  id: string;
+  display_name: string;
+  email: string | null;
+  sample_clip_path: string | null;
+  centroids: PersonCentroid[];
 }
 
 /**
@@ -102,6 +160,9 @@ export interface TaskRow {
   assignee_speaker_id: string | null;
   text: string;
   done: 0 | 1;
+  /** 0 = none, 1 = low, 2 = medium, 3 = high. */
+  priority: number;
+  due_at_ms: number | null;
   created_at_ms: number;
 }
 
@@ -215,6 +276,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_meeting ON tasks(meeting_id);
 CREATE TABLE IF NOT EXISTS voice_library (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
+  email TEXT,
+  is_me INTEGER NOT NULL DEFAULT 0,
   embedding BLOB NOT NULL,
   dim INTEGER NOT NULL,
   sample_clip_path TEXT,
@@ -223,6 +286,20 @@ CREATE TABLE IF NOT EXISTS voice_library (
   updated_at_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_voice_library_name ON voice_library(display_name);
+
+-- Per-person voice fingerprints. A person can hold several centroids so we
+-- can match the same voice across different acoustic conditions (laptop mic
+-- vs headset vs phone) instead of blurring them into one mean that matches
+-- none of them well. A person with zero centroids is simply not yet
+-- voice-matchable (replaces the old dim=0 placeholder hack).
+CREATE TABLE IF NOT EXISTS voice_centroids (
+  library_id TEXT NOT NULL REFERENCES voice_library(id) ON DELETE CASCADE,
+  centroid_idx INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  dim INTEGER NOT NULL,
+  n_samples INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (library_id, centroid_idx)
+);
 
 CREATE TABLE IF NOT EXISTS tags (
   id TEXT PRIMARY KEY,
@@ -333,6 +410,15 @@ export function initDb(): DatabaseSync {
   if (!hasCol("pipeline_json")) {
     db.exec("ALTER TABLE meetings ADD COLUMN pipeline_json TEXT");
   }
+  if (!hasCol("notes_template_id")) {
+    db.exec("ALTER TABLE meetings ADD COLUMN notes_template_id TEXT");
+  }
+  if (!hasCol("bullets_json")) {
+    db.exec("ALTER TABLE meetings ADD COLUMN bullets_json TEXT");
+  }
+  if (!hasCol("scratchpad")) {
+    db.exec("ALTER TABLE meetings ADD COLUMN scratchpad TEXT");
+  }
   const folderCols = db
     .prepare("PRAGMA table_info(folders)")
     .all() as Array<{ name: string }>;
@@ -380,6 +466,52 @@ export function initDb(): DatabaseSync {
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_speakers_review ON speakers(meeting_id, needs_review);",
   );
+
+  // Voice library: optional email so a person carries a stable identity that
+  // calendar invitees match against (name matching alone is too fragile).
+  const voiceLibCols = db
+    .prepare("PRAGMA table_info(voice_library)")
+    .all() as Array<{ name: string }>;
+  if (!voiceLibCols.some((c) => c.name === "email")) {
+    db.exec("ALTER TABLE voice_library ADD COLUMN email TEXT");
+  }
+  // Self-identity flag: exactly one person can carry is_me=1 ("you"). Set
+  // manually in the People view or auto-detected from the connected calendar
+  // account email (see reconcileMeFromCalendar).
+  if (!voiceLibCols.some((c) => c.name === "is_me")) {
+    db.exec(
+      "ALTER TABLE voice_library ADD COLUMN is_me INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  // Created here (not in SCHEMA) so it runs after the column is guaranteed to
+  // exist on both fresh and migrated DBs.
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_voice_library_email ON voice_library(email);",
+  );
+  // Seed the multi-centroid table from each person's legacy single embedding
+  // (centroid 0) so voices stay matchable after the upgrade. Idempotent:
+  // skips people who already have centroids, and placeholders (dim=0).
+  db.exec(
+    `INSERT INTO voice_centroids (library_id, centroid_idx, embedding, dim, n_samples)
+       SELECT vl.id, 0, vl.embedding, vl.dim, MAX(vl.n_meetings, 1)
+         FROM voice_library vl
+        WHERE vl.dim > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM voice_centroids c WHERE c.library_id = vl.id
+          )`,
+  );
+
+  // Meeting action items gained priority + due date (task-manager redesign).
+  const taskCols = db
+    .prepare("PRAGMA table_info(tasks)")
+    .all() as Array<{ name: string }>;
+  if (!taskCols.some((c) => c.name === "priority")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!taskCols.some((c) => c.name === "due_at_ms")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN due_at_ms INTEGER");
+  }
+
   // Title + tag prefix search — NOCASE so case-insensitive LIKE 'foo%' uses
   // the index. (Substring search `%foo%` still goes through FTS5.)
   db.exec(
@@ -425,6 +557,12 @@ export function initDb(): DatabaseSync {
   );
   stmts.setSummary = db.prepare(
     `UPDATE meetings SET summary_json = ? WHERE id = ?`,
+  );
+  stmts.setBullets = db.prepare(
+    `UPDATE meetings SET bullets_json = ? WHERE id = ?`,
+  );
+  stmts.setScratchpad = db.prepare(
+    `UPDATE meetings SET scratchpad = ? WHERE id = ?`,
   );
   stmts.getMeeting = db.prepare(`SELECT * FROM meetings WHERE id = ?`);
   stmts.listMeetings = db.prepare(
@@ -474,7 +612,7 @@ export function initDb(): DatabaseSync {
 
   // Voice library
   stmts.listVoiceLibrary = db.prepare(
-    `SELECT id, display_name, dim, sample_clip_path, n_meetings,
+    `SELECT id, display_name, email, is_me, dim, sample_clip_path, n_meetings,
             created_at_ms, updated_at_ms
        FROM voice_library
        ORDER BY display_name ASC`,
@@ -484,8 +622,11 @@ export function initDb(): DatabaseSync {
   // keeps the per-row lookup at O(log n), and this query only runs on the
   // People page open (not on every detail refresh).
   stmts.listVoiceLibraryWithStats = db.prepare(
-    `SELECT vl.id, vl.display_name, vl.dim, vl.sample_clip_path,
-            vl.n_meetings, vl.created_at_ms, vl.updated_at_ms,
+    `SELECT vl.id, vl.display_name, vl.email, vl.is_me, vl.dim, vl.sample_clip_path,
+            (SELECT COUNT(DISTINCT s.meeting_id)
+               FROM speakers s
+              WHERE s.voice_library_id = vl.id) AS n_meetings,
+            vl.created_at_ms, vl.updated_at_ms,
             (SELECT MAX(m.started_at_ms)
                FROM speakers s
                JOIN meetings m ON m.id = s.meeting_id
@@ -509,27 +650,32 @@ export function initDb(): DatabaseSync {
          vl.updated_at_ms
        ) DESC`,
   );
-  stmts.listVoiceLibraryWithEmbeddings = db.prepare(
-    `SELECT id, display_name, embedding, dim, sample_clip_path, n_meetings,
-            created_at_ms, updated_at_ms
-       FROM voice_library`,
-  );
-  stmts.getVoiceLibraryEntry = db.prepare(
-    `SELECT id, display_name, embedding, dim, sample_clip_path, n_meetings,
-            created_at_ms, updated_at_ms
-       FROM voice_library WHERE id = ?`,
-  );
   stmts.insertVoiceLibrary = db.prepare(
     `INSERT INTO voice_library
-       (id, display_name, embedding, dim, sample_clip_path,
+       (id, display_name, email, embedding, dim, sample_clip_path,
         n_meetings, created_at_ms, updated_at_ms)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
   );
-  stmts.updateVoiceLibraryEmbedding = db.prepare(
+  // Bump the per-person meeting counter + touch timestamp whenever a new
+  // observation is folded in (auto-match or manual assign).
+  stmts.touchVoiceLibrary = db.prepare(
     `UPDATE voice_library
-        SET embedding = ?,
-            n_meetings = n_meetings + 1,
+        SET n_meetings = n_meetings + 1,
             updated_at_ms = ?
+      WHERE id = ?`,
+  );
+  // Backfill an email only when the person doesn't already have one — never
+  // clobber a confirmed address with a guess from a later meeting.
+  stmts.setVoiceLibraryEmail = db.prepare(
+    `UPDATE voice_library
+        SET email = ?, updated_at_ms = ?
+      WHERE id = ? AND (email IS NULL OR email = '')`,
+  );
+  // Unconditional overwrite (incl. clearing to NULL) — for explicit manual
+  // edits in the People view, which must be able to correct/remove an address.
+  stmts.setVoiceLibraryEmailForce = db.prepare(
+    `UPDATE voice_library
+        SET email = ?, updated_at_ms = ?
       WHERE id = ?`,
   );
   stmts.renameVoiceLibrary = db.prepare(
@@ -537,6 +683,39 @@ export function initDb(): DatabaseSync {
   );
   stmts.deleteVoiceLibrary = db.prepare(
     `DELETE FROM voice_library WHERE id = ?`,
+  );
+
+  // Self-identity ("you"). clearMe + setMeById run together in a transaction
+  // to keep the one-person-only invariant. Being "me" doesn't bump
+  // updated_at_ms — it shouldn't reorder the People list.
+  stmts.clearMe = db.prepare(
+    `UPDATE voice_library SET is_me = 0 WHERE is_me = 1`,
+  );
+  stmts.setMeById = db.prepare(
+    `UPDATE voice_library SET is_me = 1 WHERE id = ?`,
+  );
+  stmts.getMeId = db.prepare(
+    `SELECT id FROM voice_library WHERE is_me = 1 LIMIT 1`,
+  );
+
+  // Centroids — the matcher's source of truth for a person's voice.
+  stmts.listAllCentroids = db.prepare(
+    `SELECT library_id, centroid_idx, embedding, dim, n_samples
+       FROM voice_centroids`,
+  );
+  stmts.listCentroidsForPerson = db.prepare(
+    `SELECT centroid_idx, embedding, dim, n_samples
+       FROM voice_centroids WHERE library_id = ?`,
+  );
+  stmts.insertCentroid = db.prepare(
+    `INSERT INTO voice_centroids
+       (library_id, centroid_idx, embedding, dim, n_samples)
+     VALUES (?, ?, ?, ?, ?)`,
+  );
+  stmts.updateCentroid = db.prepare(
+    `UPDATE voice_centroids
+        SET embedding = ?, n_samples = ?
+      WHERE library_id = ? AND centroid_idx = ?`,
   );
 
   // Tags + meeting_tags
@@ -662,6 +841,26 @@ export function initDb(): DatabaseSync {
   stmts.deleteTasksForMeeting = db.prepare(
     `DELETE FROM tasks WHERE meeting_id = ?`,
   );
+  stmts.getTask = db.prepare(`SELECT * FROM tasks WHERE id = ?`);
+  stmts.insertTaskFull = db.prepare(
+    `INSERT INTO tasks (meeting_id, assignee_speaker_id, text, done, priority, due_at_ms, created_at_ms)
+     VALUES (?, ?, ?, 0, ?, ?, ?)`,
+  );
+  stmts.setTaskPriority = db.prepare(
+    `UPDATE tasks SET priority = ? WHERE id = ?`,
+  );
+  stmts.setTaskDueDate = db.prepare(
+    `UPDATE tasks SET due_at_ms = ? WHERE id = ?`,
+  );
+  stmts.setTaskAssignee = db.prepare(
+    `UPDATE tasks SET assignee_speaker_id = ? WHERE id = ?`,
+  );
+  stmts.updateTaskText = db.prepare(`UPDATE tasks SET text = ? WHERE id = ?`);
+  stmts.deleteTask = db.prepare(`DELETE FROM tasks WHERE id = ?`);
+
+  // Auto-detect "you" from the connected calendar account on every boot
+  // (no-op once someone is marked, or when no account/match exists).
+  reconcileMeFromCalendar();
 
   return db;
 }
@@ -747,6 +946,27 @@ export function setSummary(id: string, summaryJson: string | null): void {
   broadcastTreeInvalidated();
 }
 
+/**
+ * Replace the condensed "key points" list. Pass a JSON-serialized array of
+ * strings, or null to clear. Written by the notes LLM pass and by the MCP
+ * `set_bullets` tool.
+ */
+export function setBullets(id: string, bulletsJson: string | null): void {
+  initDb();
+  stmts.setBullets.run(bulletsJson, id);
+  broadcastTreeInvalidated();
+}
+
+/**
+ * Replace the free-form scratch pad text (null/empty clears it). Saved from
+ * the renderer on debounce and via the MCP `set_scratchpad` tool. No
+ * broadcast: in-app edits already update optimistically and saves fire often.
+ */
+export function setScratchpad(id: string, text: string | null): void {
+  initDb();
+  stmts.setScratchpad.run(text && text.length > 0 ? text : null, id);
+}
+
 export function updatePipeline(id: string, patch: Partial<Pipeline>): void {
   initDb();
   const db = initDb();
@@ -766,6 +986,15 @@ export function updatePipeline(id: string, patch: Partial<Pipeline>): void {
     JSON.stringify(next),
     id,
   );
+}
+
+export function setMeetingTemplate(id: string, templateId: string | null): void {
+  const db = initDb();
+  db.prepare(`UPDATE meetings SET notes_template_id = ? WHERE id = ?`).run(
+    templateId,
+    id,
+  );
+  broadcastTreeInvalidated();
 }
 
 export function getMeeting(id: string): MeetingRow | null {
@@ -798,6 +1027,16 @@ export function insertTranscriptSegment(seg: TranscriptRow): void {
 
 export function deleteTranscriptForMeeting(meetingId: string): void {
   initDb().prepare(`DELETE FROM transcripts WHERE meeting_id = ?`).run(meetingId);
+}
+
+export function deleteSpeakersForMeeting(meetingId: string): void {
+  initDb().prepare(`DELETE FROM speakers WHERE meeting_id = ?`).run(meetingId);
+}
+
+export function clearTranscriptSpeakers(meetingId: string): void {
+  initDb()
+    .prepare(`UPDATE transcripts SET speaker_id = NULL WHERE meeting_id = ?`)
+    .run(meetingId);
 }
 
 export function listTranscript(meetingId: string): TranscriptRow[] {
@@ -899,17 +1138,6 @@ export function getSpeakerEmbedding(
 
 // --- Voice library CRUD -----------------------------------------------------
 
-interface VoiceLibraryDbRow {
-  id: string;
-  display_name: string;
-  embedding?: Uint8Array;
-  dim: number;
-  sample_clip_path: string | null;
-  n_meetings: number;
-  created_at_ms: number;
-  updated_at_ms: number;
-}
-
 export function listVoiceLibrary(): VoiceLibraryRow[] {
   initDb();
   return stmts.listVoiceLibrary.all() as unknown as VoiceLibraryRow[];
@@ -920,92 +1148,168 @@ export function listVoiceLibraryWithStats(): VoiceLibraryPerson[] {
   return stmts.listVoiceLibraryWithStats.all() as unknown as VoiceLibraryPerson[];
 }
 
-// In-memory cache of the deserialized voice library. Scoring a single
-// speaker calls this once per candidate; without the cache each scoring
-// pass redoes a full table read + N Float32Array copies.
-let voiceLibraryCache: VoiceLibraryEntry[] | null = null;
+// In-memory cache of the deserialized people-with-centroids set. Scoring a
+// meeting's speakers reads the whole library once per speaker; the cache
+// avoids redoing a full table read + Float32Array copies each time.
+let voiceLibraryCache: PersonWithCentroids[] | null = null;
 
 function invalidateVoiceLibraryCache(): void {
   voiceLibraryCache = null;
 }
 
-export function listVoiceLibraryWithEmbeddings(): VoiceLibraryEntry[] {
+interface CentroidDbRow {
+  library_id: string;
+  centroid_idx: number;
+  embedding: Uint8Array;
+  dim: number;
+  n_samples: number;
+}
+
+/** Every library person bundled with its centroids — the matcher's input. */
+export function listPeopleWithCentroids(): PersonWithCentroids[] {
   if (voiceLibraryCache) return voiceLibraryCache;
   initDb();
-  const rows = stmts.listVoiceLibraryWithEmbeddings.all() as unknown as
-    VoiceLibraryDbRow[];
-  voiceLibraryCache = rows.map((r) => ({
-    id: r.id,
-    display_name: r.display_name,
-    dim: r.dim,
-    sample_clip_path: r.sample_clip_path,
-    n_meetings: r.n_meetings,
-    created_at_ms: r.created_at_ms,
-    updated_at_ms: r.updated_at_ms,
-    embedding: blobToEmbedding(r.embedding!),
+  const people = stmts.listVoiceLibrary.all() as unknown as VoiceLibraryRow[];
+  const centroidRows =
+    stmts.listAllCentroids.all() as unknown as CentroidDbRow[];
+  const byPerson = new Map<string, PersonCentroid[]>();
+  for (const c of centroidRows) {
+    const list = byPerson.get(c.library_id) ?? [];
+    list.push({
+      embedding: blobToEmbedding(c.embedding),
+      nSamples: c.n_samples,
+    });
+    byPerson.set(c.library_id, list);
+  }
+  voiceLibraryCache = people.map((p) => ({
+    id: p.id,
+    display_name: p.display_name,
+    email: p.email,
+    sample_clip_path: p.sample_clip_path,
+    centroids: byPerson.get(p.id) ?? [],
   }));
   return voiceLibraryCache;
 }
 
-export function getVoiceLibraryEntry(id: string): VoiceLibraryEntry | null {
+/** Centroids of one person, with their stored index so callers can update a
+ *  specific row in place. */
+export function getCentroidsForPerson(
+  id: string,
+): Array<{ idx: number; embedding: Float32Array; nSamples: number }> {
   initDb();
-  const row = stmts.getVoiceLibraryEntry.get(id) as
-    | VoiceLibraryDbRow
-    | undefined;
-  if (!row) return null;
-  return {
-    id: row.id,
-    display_name: row.display_name,
-    dim: row.dim,
-    sample_clip_path: row.sample_clip_path,
-    n_meetings: row.n_meetings,
-    created_at_ms: row.created_at_ms,
-    updated_at_ms: row.updated_at_ms,
-    embedding: blobToEmbedding(row.embedding!),
-  };
+  const rows = stmts.listCentroidsForPerson.all(id) as unknown as Array<{
+    centroid_idx: number;
+    embedding: Uint8Array;
+    n_samples: number;
+  }>;
+  return rows.map((r) => ({
+    idx: r.centroid_idx,
+    embedding: blobToEmbedding(r.embedding),
+    nSamples: r.n_samples,
+  }));
 }
 
+export function addCentroid(opts: {
+  libraryId: string;
+  idx: number;
+  embedding: Float32Array;
+  nSamples: number;
+}): void {
+  initDb();
+  stmts.insertCentroid.run(
+    opts.libraryId,
+    opts.idx,
+    embeddingToBlob(opts.embedding),
+    opts.embedding.length,
+    opts.nSamples,
+  );
+  invalidateVoiceLibraryCache();
+}
+
+export function updateCentroid(opts: {
+  libraryId: string;
+  idx: number;
+  embedding: Float32Array;
+  nSamples: number;
+}): void {
+  initDb();
+  stmts.updateCentroid.run(
+    embeddingToBlob(opts.embedding),
+    opts.nSamples,
+    opts.libraryId,
+    opts.idx,
+  );
+  invalidateVoiceLibraryCache();
+}
+
+/** Bump n_meetings + updated_at after folding a new observation into a person. */
+export function touchPerson(id: string): void {
+  initDb();
+  stmts.touchVoiceLibrary.run(Date.now(), id);
+  invalidateVoiceLibraryCache();
+}
+
+/** Attach an email to a person — no-op if they already have one. Used by the
+ *  auto path (tagging from a calendar invitee) so a later meeting never
+ *  clobbers a confirmed address. */
+export function setPersonEmail(id: string, email: string): void {
+  initDb();
+  const clean = email.trim().toLowerCase();
+  if (!clean) return;
+  stmts.setVoiceLibraryEmail.run(clean, Date.now(), id);
+  invalidateVoiceLibraryCache();
+  // Backfill is the automatic path (calendar-driven tagging) — a freshly
+  // stamped address may be the user's own, so re-check self-identity.
+  reconcileMeFromCalendar();
+}
+
+/** Overwrite (or clear, with null/empty) a person's email — used by explicit
+ *  manual edits in the People view, where the user can correct or remove it. */
+export function updatePersonEmail(id: string, email: string | null): void {
+  initDb();
+  const clean = email?.trim().toLowerCase() || null;
+  stmts.setVoiceLibraryEmailForce.run(clean, Date.now(), id);
+  invalidateVoiceLibraryCache();
+}
+
+/** Create a person row. Voice fingerprints live in voice_centroids and are
+ *  added separately (a person can exist name-only until first heard). The
+ *  legacy embedding/dim columns are zero-filled to satisfy the NOT NULL. */
 export function createVoiceLibraryEntry(opts: {
   id: string;
   displayName: string;
-  embedding: Float32Array;
+  email: string | null;
   sampleClipPath: string | null;
-}): VoiceLibraryEntry {
+}): VoiceLibraryRow {
   initDb();
   const now = Date.now();
+  const email = opts.email?.trim().toLowerCase() || null;
   stmts.insertVoiceLibrary.run(
     opts.id,
     opts.displayName,
-    embeddingToBlob(opts.embedding),
-    opts.embedding.length,
+    email,
+    new Uint8Array(0),
+    0,
     opts.sampleClipPath,
     now,
     now,
   );
   invalidateVoiceLibraryCache();
+  // A person created with an email (e.g. tagging the calendar's self invitee)
+  // may be the user — re-check self-identity. is_me in the returned literal
+  // stays 0; callers use .id, and renderers refetch on the broadcast.
+  if (email) reconcileMeFromCalendar();
   return {
     id: opts.id,
     display_name: opts.displayName,
-    embedding: opts.embedding,
-    dim: opts.embedding.length,
+    email,
+    is_me: 0,
+    dim: 0,
     sample_clip_path: opts.sampleClipPath,
     n_meetings: 1,
     created_at_ms: now,
     updated_at_ms: now,
   };
-}
-
-export function updateVoiceLibraryEmbedding(opts: {
-  id: string;
-  newEmbedding: Float32Array;
-}): void {
-  initDb();
-  stmts.updateVoiceLibraryEmbedding.run(
-    embeddingToBlob(opts.newEmbedding),
-    Date.now(),
-    opts.id,
-  );
-  invalidateVoiceLibraryCache();
 }
 
 export function renameVoiceLibraryEntry(id: string, displayName: string): void {
@@ -1018,6 +1322,45 @@ export function deleteVoiceLibraryEntry(id: string): void {
   initDb();
   stmts.deleteVoiceLibrary.run(id);
   invalidateVoiceLibraryCache();
+}
+
+/** Mark one person as "you" (clearing any previous one), or pass null to
+ *  clear the flag entirely. Enforces the single-"me" invariant. */
+export function markLibraryEntryAsMe(id: string | null): void {
+  initDb();
+  stmts.clearMe.run();
+  if (id) stmts.setMeById.run(id);
+  invalidateVoiceLibraryCache();
+}
+
+/** The library id of the person representing the app user, or null. */
+export function getMeLibraryId(): string | null {
+  initDb();
+  const row = stmts.getMeId.get() as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/** Auto-link "you" to the person whose email matches a connected calendar
+ *  account — but only when no one is marked yet, so a manual choice (or an
+ *  earlier auto-link) always wins. Runs at startup and after auto email
+ *  writes (e.g. tagging the calendar's self invitee, which carries your
+ *  account address). */
+export function reconcileMeFromCalendar(): void {
+  initDb();
+  if (getMeLibraryId()) return;
+  const accountEmails = new Set(
+    listCalendarAccounts()
+      .map((a) => a.email?.trim().toLowerCase())
+      .filter((e): e is string => !!e),
+  );
+  if (accountEmails.size === 0) return;
+  const match = listVoiceLibrary().find(
+    (p) => p.email && accountEmails.has(p.email.toLowerCase()),
+  );
+  if (match) {
+    stmts.setMeById.run(match.id);
+    invalidateVoiceLibraryCache();
+  }
 }
 
 export function insertTask(
@@ -1042,6 +1385,73 @@ export function setTaskDone(taskId: number, done: boolean): void {
 export function deleteTasksForMeeting(meetingId: string): void {
   initDb();
   stmts.deleteTasksForMeeting.run(meetingId);
+}
+
+export function getTask(taskId: number): TaskRow | null {
+  initDb();
+  return (stmts.getTask.get(taskId) as unknown as TaskRow) ?? null;
+}
+
+export function addTask(
+  meetingId: string,
+  text: string,
+  assigneeSpeakerId: string | null = null,
+): TaskRow {
+  initDb();
+  const info = stmts.insertTask.run(
+    meetingId,
+    assigneeSpeakerId,
+    text,
+    Date.now(),
+  );
+  return stmts.getTask.get(
+    Number(info.lastInsertRowid),
+  ) as unknown as TaskRow;
+}
+
+export function duplicateTask(taskId: number): TaskRow | null {
+  initDb();
+  const src = stmts.getTask.get(taskId) as unknown as TaskRow | undefined;
+  if (!src) return null;
+  const info = stmts.insertTaskFull.run(
+    src.meeting_id,
+    src.assignee_speaker_id,
+    src.text,
+    src.priority,
+    src.due_at_ms,
+    Date.now(),
+  );
+  return stmts.getTask.get(
+    Number(info.lastInsertRowid),
+  ) as unknown as TaskRow;
+}
+
+export function setTaskPriority(taskId: number, priority: number): void {
+  initDb();
+  stmts.setTaskPriority.run(priority, taskId);
+}
+
+export function setTaskDueDate(taskId: number, dueAtMs: number | null): void {
+  initDb();
+  stmts.setTaskDueDate.run(dueAtMs, taskId);
+}
+
+export function setTaskAssignee(
+  taskId: number,
+  speakerId: string | null,
+): void {
+  initDb();
+  stmts.setTaskAssignee.run(speakerId, taskId);
+}
+
+export function updateTaskText(taskId: number, text: string): void {
+  initDb();
+  stmts.updateTaskText.run(text, taskId);
+}
+
+export function deleteTask(taskId: number): void {
+  initDb();
+  stmts.deleteTask.run(taskId);
 }
 
 // --- Tags --------------------------------------------------------------------
@@ -1519,6 +1929,7 @@ export interface AggregatedTaskRow extends TaskRow {
   meeting_title: string;
   meeting_started_at_ms: number;
   assignee_name: string | null;
+  assignee_library_id: string | null;
 }
 
 export function listAllMeetingTasks(): AggregatedTaskRow[] {
@@ -1526,7 +1937,7 @@ export function listAllMeetingTasks(): AggregatedTaskRow[] {
   return db
     .prepare(
       `SELECT t.*, m.title AS meeting_title, m.started_at_ms AS meeting_started_at_ms,
-              s.display_name AS assignee_name
+              s.display_name AS assignee_name, s.voice_library_id AS assignee_library_id
          FROM tasks t
          JOIN meetings m ON m.id = t.meeting_id
          LEFT JOIN speakers s
@@ -1534,4 +1945,89 @@ export function listAllMeetingTasks(): AggregatedTaskRow[] {
         ORDER BY t.done ASC, m.started_at_ms DESC, t.id ASC`,
     )
     .all() as unknown as AggregatedTaskRow[];
+}
+
+export interface UsageTotals {
+  meetings: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  duration_ms: number;
+  num_turns: number;
+  /** Highest pre-computed cost across all runs — useful to surface "biggest
+   *  single meeting" without doing per-row work in the UI. */
+  max_single_cost_usd: number;
+  /** Timestamp of the most recent meeting with usage data, for "last run"
+   *  hints in the settings panel. */
+  last_used_at_ms: number | null;
+}
+
+const EMPTY_USAGE_TOTALS: UsageTotals = {
+  meetings: 0,
+  cost_usd: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  duration_ms: 0,
+  num_turns: 0,
+  max_single_cost_usd: 0,
+  last_used_at_ms: null,
+};
+
+/**
+ * Sum usage across every meeting that has `pipeline_json.notes_usage`.
+ * Optional filter narrows by billing kind so Settings can show the user a
+ * separate total for their subscription-backed Claude CLI runs vs the
+ * metered Anthropic API runs.
+ *
+ * We parse JSON per row in JS rather than in SQL — the meetings table is
+ * small (hundreds, not millions) and json_extract gymnastics make the
+ * filter logic awkward. Cheap enough.
+ */
+export function aggregateUsage(
+  filter?: { billingKind?: "subscription" | "metered" },
+): UsageTotals {
+  const db = initDb();
+  const rows = db
+    .prepare(
+      `SELECT pipeline_json, started_at_ms FROM meetings WHERE pipeline_json IS NOT NULL`,
+    )
+    .all() as Array<{
+    pipeline_json: string;
+    started_at_ms: number;
+  }>;
+  const totals = { ...EMPTY_USAGE_TOTALS };
+  for (const row of rows) {
+    let parsed: Pipeline | null = null;
+    try {
+      parsed = JSON.parse(row.pipeline_json) as Pipeline;
+    } catch {
+      continue;
+    }
+    const u = parsed.notes_usage;
+    if (!u) continue;
+    if (filter?.billingKind && u.billing_kind !== filter.billingKind) continue;
+    totals.meetings += 1;
+    totals.cost_usd += u.cost_usd ?? 0;
+    totals.input_tokens += u.input_tokens ?? 0;
+    totals.output_tokens += u.output_tokens ?? 0;
+    totals.cache_creation_input_tokens +=
+      u.cache_creation_input_tokens ?? 0;
+    totals.cache_read_input_tokens += u.cache_read_input_tokens ?? 0;
+    totals.duration_ms += u.duration_ms ?? 0;
+    totals.num_turns += u.num_turns ?? 0;
+    if ((u.cost_usd ?? 0) > totals.max_single_cost_usd) {
+      totals.max_single_cost_usd = u.cost_usd ?? 0;
+    }
+    if (
+      totals.last_used_at_ms === null ||
+      row.started_at_ms > totals.last_used_at_ms
+    ) {
+      totals.last_used_at_ms = row.started_at_ms;
+    }
+  }
+  return totals;
 }

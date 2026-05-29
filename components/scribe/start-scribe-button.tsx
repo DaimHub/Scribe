@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { FlashIcon, RecordIcon } from "@hugeicons/core-free-icons";
+import { useT } from "@/lib/i18n";
 
 /**
  * Compact Start/Stop Scribe button used in the top bar.
@@ -18,6 +19,7 @@ export function StartScribeButton() {
   const stopRecording = useScribe((s) => s.stopRecording);
   const recording = useScribe((s) => s.recording);
   const activeEvent = useScribe((s) => s.activeCalendarEvent);
+  const t = useT();
 
   const isRecording = recording.kind === "recording";
   const isStarting = recording.kind === "starting";
@@ -25,14 +27,16 @@ export function StartScribeButton() {
   const isBusy = isStarting || isStopping;
 
   const label = isRecording
-    ? "Stop"
+    ? t("recording.stop")
     : isStarting
-      ? "Starting…"
+      ? t("recording.startingEllipsis")
       : isStopping
-        ? "Stopping…"
+        ? t("recording.stoppingEllipsis")
         : activeEvent
-          ? `Start "${truncate(activeEvent.title, 16)}"`
-          : "Start Scribe";
+          ? t("recording.startEvent", {
+              title: truncate(activeEvent.title, 16),
+            })
+          : t("recording.start");
 
   const button = (
     <Button
@@ -58,7 +62,10 @@ export function StartScribeButton() {
     <Tooltip>
       <TooltipTrigger render={(props) => <span {...props}>{button}</span>} />
       <TooltipContent side="bottom">
-        {`Linked to "${activeEvent.title}" — started ${minutesAgo(activeEvent.start_at_ms)} min ago`}
+        {t("recording.linkedTooltip", {
+          title: activeEvent.title,
+          minutes: minutesAgo(activeEvent.start_at_ms),
+        })}
       </TooltipContent>
     </Tooltip>
   );

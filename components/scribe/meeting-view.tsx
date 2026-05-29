@@ -4,22 +4,36 @@ import { useEffect, useRef } from "react";
 import { useScribe, type MeetingTab } from "@/lib/store";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useT } from "@/lib/i18n";
 import { MeetingHeader } from "./meeting-header";
 import { TranscriptView } from "./transcript-view";
 import { NotesView } from "./notes-view";
 import { SummaryView } from "./summary-view";
+import { BulletsView } from "./bullets-view";
+import { ScratchpadView } from "./scratchpad-view";
 import { ProcessingProgress } from "./processing-progress";
-import { VoiceTaggingPanel } from "./voice-tagging-panel";
 import { AudioPlayer } from "./audio-player";
+import { Wordmark } from "./wordmark";
 
 export function MeetingView() {
   const detail = useScribe((s) => s.detail);
   const selectedId = useScribe((s) => s.selectedId);
   const activeTab = useScribe((s) => s.meetingTab);
   const setActiveTab = useScribe((s) => s.setMeetingTab);
+  const t = useT();
 
   const meetingId = detail?.meeting.id;
   const hasSummary = !!detail?.meeting.summary_json;
+  const bulletsCount = (() => {
+    const raw = detail?.meeting.bullets_json;
+    if (!raw) return 0;
+    try {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.length : 0;
+    } catch {
+      return 0;
+    }
+  })();
 
   // Reset to the appropriate landing tab whenever we switch to a different
   // meeting. Deliberately only react to id changes — hasSummary flipping
@@ -34,10 +48,13 @@ export function MeetingView() {
 
   if (!detail || !selectedId) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6">
-        <div className="text-base font-medium">No meeting selected</div>
-        <p className="max-w-sm text-center text-sm text-muted-foreground">
-          Start a new recording from the sidebar, or pick one from the list.
+      <div className="flex flex-1 flex-col items-center justify-center px-6">
+        <Wordmark className="text-6xl text-foreground/90" />
+        <div className="mt-5 text-base font-medium">
+          {t("meeting.empty.title")}
+        </div>
+        <p className="mt-1.5 max-w-sm text-center text-sm text-muted-foreground">
+          {t("meeting.empty.hint")}
         </p>
       </div>
     );
@@ -46,7 +63,6 @@ export function MeetingView() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <ProcessingProgress meetingId={detail.meeting.id} />
-      <VoiceTaggingPanel meetingId={detail.meeting.id} />
       <Tabs
         value={activeTab}
         onValueChange={(v) => setActiveTab(v as MeetingTab)}
@@ -62,18 +78,27 @@ export function MeetingView() {
               Tasks remains one click away. */}
           <div className="sticky top-0 z-10 border-b bg-background">
             <div className="mx-auto w-full max-w-3xl px-8">
-              <TabsList className="h-auto rounded-none border-b-0 bg-transparent p-0">
-                <TabSlot value="summary" label="Summary" />
+              <TabsList
+                variant="line"
+                className="h-auto rounded-none border-b-0 p-0"
+              >
+                <TabSlot value="summary" label={t("meeting.tab.summary")} />
+                <TabSlot
+                  value="bullets"
+                  label={t("meeting.tab.bullets")}
+                  badge={bulletsCount || undefined}
+                />
                 <TabSlot
                   value="transcript"
-                  label="Transcript"
+                  label={t("meeting.tab.transcript")}
                   badge={detail.transcript.length || undefined}
                 />
                 <TabSlot
                   value="tasks"
-                  label="Tasks"
+                  label={t("meeting.tab.tasks")}
                   badge={detail.tasks.length || undefined}
                 />
+                <TabSlot value="scratchpad" label={t("meeting.tab.scratchpad")} />
               </TabsList>
             </div>
           </div>
@@ -84,6 +109,9 @@ export function MeetingView() {
               zero to scroll height. */}
           <TabsContent value="summary" keepMounted className="m-0 outline-none">
             <SummaryView detail={detail} />
+          </TabsContent>
+          <TabsContent value="bullets" keepMounted className="m-0 outline-none">
+            <BulletsView detail={detail} />
           </TabsContent>
           <TabsContent value="transcript" keepMounted className="m-0 outline-none">
             <div className="mx-auto w-full max-w-3xl px-8">
@@ -98,6 +126,9 @@ export function MeetingView() {
           </TabsContent>
           <TabsContent value="tasks" keepMounted className="m-0 outline-none">
             <NotesView detail={detail} />
+          </TabsContent>
+          <TabsContent value="scratchpad" keepMounted className="m-0 outline-none">
+            <ScratchpadView detail={detail} />
           </TabsContent>
         </ScrollArea>
       </Tabs>
@@ -117,7 +148,11 @@ function TabSlot({
   return (
     <TabsTrigger
       value={value}
-      className="relative rounded-none border-b-2 border-transparent bg-transparent px-1 py-3 mr-6 font-medium text-muted-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground"
+      // Base-ui exposes the active state as `data-active` (presence attr), not
+      // `data-state="active"`. The line variant in components/ui/tabs.tsx
+      // already pins the active background and dark-mode border to
+      // transparent; we just need to colour the underline.
+      className="relative mr-6 rounded-none border-0 bg-transparent px-1 py-3 font-medium text-muted-foreground after:bg-primary group-data-horizontal/tabs:after:bottom-[-1px] data-active:text-foreground"
     >
       {label}
       {badge != null && badge > 0 && (

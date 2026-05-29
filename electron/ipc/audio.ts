@@ -1,4 +1,10 @@
-import { ipcMain, desktopCapturer, session } from "electron";
+import {
+  ipcMain,
+  desktopCapturer,
+  session,
+  shell,
+  systemPreferences,
+} from "electron";
 import {
   appendFrames,
   startMeeting,
@@ -38,6 +44,24 @@ export function registerAudioIpc(): void {
     });
     return sources.map((s) => ({ id: s.id, name: s.name }));
   });
+
+  // System-audio capture goes through getDisplayMedia, which needs Screen
+  // Recording permission on macOS. The renderer checks this before recording to
+  // warn up front instead of failing with an opaque "Invalid capture constraints".
+  ipcMain.handle(
+    "audio:getScreenAccessStatus",
+    async (): Promise<string> =>
+      process.platform === "darwin"
+        ? systemPreferences.getMediaAccessStatus("screen")
+        : "granted",
+  );
+
+  ipcMain.handle("audio:openScreenSettings", async (): Promise<void> => {
+    if (process.platform !== "darwin") return;
+    await shell.openExternal(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    );
+  });
 }
 
 export function installDisplayMediaHandler(): void {
@@ -49,6 +73,15 @@ export function installDisplayMediaHandler(): void {
         });
         const primary = sources[0];
         if (!primary) {
+          // No screen sources almost always means Screen Recording permission
+          // hasn't been granted (especially for an unsigned build, where the
+          // grant doesn't persist across rebuilds). Log the access status so the
+          // cause is visible; the renderer surfaces a permission hint to the user.
+          const status = systemPreferences.getMediaAccessStatus("screen");
+          console.warn(
+            `[scribe] getDisplayMedia: no screen sources (screen access: ${status}); ` +
+              `system audio needs Screen Recording permission.`,
+          );
           callback({});
           return;
         }

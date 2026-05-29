@@ -17,3 +17,15 @@ export const TREE_INVALIDATED = "tree:invalidated";
 export function broadcastTreeInvalidated(): void {
   broadcast(TREE_INVALIDATED);
 }
+
+/**
+ * Fire when the global voice_library table changes — new entries created
+ * from a speaker assignment, renames, deletes, or embeddings merged after
+ * a transcription run. Any open renderer that depends on the library list
+ * (People tab, tagging popover) should refetch.
+ */
+export const VOICE_LIBRARY_CHANGED = "voice:libraryChanged";
+
+export function broadcastVoiceLibraryChanged(): void {
+  broadcast(VOICE_LIBRARY_CHANGED);
+}

@@ -6,7 +6,21 @@ import ffmpegStatic from "ffmpeg-static";
 
 const exec = promisify(execFile);
 
-const FFMPEG = (ffmpegStatic as unknown as string) ?? "ffmpeg";
+/**
+ * ffmpeg-static reports its binary path relative to its own module dir, which
+ * in a packaged app lives INSIDE app.asar — a file, not a directory, so
+ * spawning it fails with `spawn ENOTDIR`. electron-builder auto-unpacks the
+ * binary to app.asar.unpacked; rewrite the path to that real on-disk copy.
+ * The lookahead only matches `app.asar` when a path separator follows, so it
+ * never rewrites an already-unpacked path. No-op in dev (no app.asar segment).
+ */
+function resolveFfmpeg(): string {
+  const p = ffmpegStatic as unknown as string | null;
+  if (!p) return "ffmpeg";
+  return p.replace(/app\.asar(?=[\\/])/, "app.asar.unpacked");
+}
+
+export const FFMPEG_PATH = resolveFfmpeg();
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -51,12 +65,12 @@ export async function mixToMono16k(opts: MixOpts): Promise<string> {
 
   args.push("-ar", String(sr), "-ac", "1", "-c:a", "pcm_s16le", opts.outputPath);
 
-  await exec(FFMPEG, args);
+  await exec(FFMPEG_PATH, args);
   return opts.outputPath;
 }
 
 export async function ffmpegBinary(): Promise<string> {
-  return FFMPEG;
+  return FFMPEG_PATH;
 }
 
 export interface ExtractClipOpts {
@@ -76,7 +90,7 @@ export async function extractClip(opts: ExtractClipOpts): Promise<string> {
   if (Number(durSec) <= 0) {
     throw new Error("Invalid clip range");
   }
-  await exec(FFMPEG, [
+  await exec(FFMPEG_PATH, [
     "-y",
     "-loglevel",
     "error",

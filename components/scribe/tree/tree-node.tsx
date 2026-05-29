@@ -16,6 +16,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { cn } from "@/lib/utils";
 import { useScribe, formatDuration } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { useMemo } from "react";
 import {
   DropdownMenu,
@@ -96,6 +97,7 @@ export function TreeNode({
   const setPinned = useScribe((s) => s.setPinned);
   const createFolder = useScribe((s) => s.createFolder);
   const setFolderAutoTag = useScribe((s) => s.setFolderAutoTag);
+  const t = useT();
 
   const isSelected = data.kind === "meeting" && selectedId === data.id;
   const tagPairs = useScribe((s) => s.meetingTagPairs);
@@ -105,7 +107,7 @@ export function TreeNode({
     const ids = tagPairs
       .filter((p) => p.meeting_id === data.id)
       .map((p) => p.tag_id);
-    const byId = new Map(allTags.map((t) => [t.id, t]));
+    const byId = new Map(allTags.map((tag) => [tag.id, tag]));
     return ids
       .map((id) => byId.get(id)?.color ?? null)
       .filter((c): c is string => !!c)
@@ -190,14 +192,14 @@ export function TreeNode({
       )}
 
       {isFolder && data.kind === "folder" && data.folder.auto_tag_id && (() => {
-        const tag = allTags.find((t) => t.id === data.folder.auto_tag_id);
+        const tag = allTags.find((at) => at.id === data.folder.auto_tag_id);
         if (!tag) return null;
         return (
           <span
             className="inline-block size-1.5 shrink-0 rounded-full"
             style={{ background: tag.color ?? "var(--muted-foreground)" }}
-            title={`Auto-tag: #${tag.name}`}
-            aria-label={`Auto-tag: ${tag.name}`}
+            title={t("tree.autoTagTooltip", { name: tag.name })}
+            aria-label={t("tree.autoTagAria", { name: tag.name })}
           />
         );
       })()}
@@ -231,17 +233,17 @@ export function TreeNode({
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <IconBtn
             icon={PencilEdit01Icon}
-            label="Rename"
+            label={t("common.rename")}
             onClick={() => node.edit()}
           />
           <IconBtn
             icon={FolderAddIcon}
-            label="New folder inside"
+            label={t("tree.newFolderInside")}
             onClick={() => void createFolder(data.id)}
           />
           <IconBtn
             icon={Mic01Icon}
-            label="Start meeting in folder"
+            label={t("tree.startMeetingInFolder")}
             onClick={() => void startRecording({ folderId: data.id })}
           />
           {data.kind === "folder" && (
@@ -253,12 +255,12 @@ export function TreeNode({
           )}
           <IconBtn
             icon={Delete02Icon}
-            label="Delete folder"
+            label={t("tree.deleteFolder")}
             variant="destructive"
             onClick={() => {
               if (
                 window.confirm(
-                  `Delete "${data.name}"? Meetings inside will move up one level.`,
+                  t("tree.deleteFolderConfirm", { name: data.name }),
                 )
               ) {
                 void deleteFolder(data.id);
@@ -289,24 +291,26 @@ export function TreeNode({
                 }
               >
                 {data.kind === "meeting" && data.meeting.pinned
-                  ? "Unpin"
-                  : "Pin to top"}
+                  ? t("tree.unpin")
+                  : t("tree.pinToTop")}
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => node.edit()}>Rename</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => node.edit()}>
+                {t("common.rename")}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 variant="destructive"
                 onClick={() => {
                   if (
                     window.confirm(
-                      `Delete "${data.name}"? Recording, transcript, and notes will be permanently removed.`,
+                      t("tree.deleteMeetingConfirm", { name: data.name }),
                     )
                   ) {
                     void deleteMeeting(data.id);
                   }
                 }}
               >
-                Delete meeting
+                {t("tree.deleteMeeting")}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -325,17 +329,18 @@ function FolderAutoTagMenu({
   onChange: (tagId: string | null) => void;
 }) {
   const allTags = useScribe((s) => s.allTags);
+  const t = useT();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
-        title={currentTagId ? "Change auto-tag" : "Set auto-tag"}
+        title={currentTagId ? t("tree.changeAutoTag") : t("tree.setAutoTag")}
         className={cn(
           "inline-flex size-5 shrink-0 items-center justify-center rounded transition-colors hover:bg-accent hover:text-foreground",
           currentTagId ? "text-foreground" : "text-muted-foreground",
         )}
-        aria-label="Auto-tag"
+        aria-label={t("tree.autoTag")}
       >
         <HugeiconsIcon icon={Tag01Icon} className="size-3.5" />
       </DropdownMenuTrigger>
@@ -345,17 +350,17 @@ function FolderAutoTagMenu({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-          Auto-move when tagged with
+          {t("tree.autoMoveHeading")}
         </div>
         <DropdownMenuItem onClick={() => onChange(null)}>
           <span className="text-muted-foreground">
-            {currentTagId ? "✓ Clear" : "None"}
+            {currentTagId ? `✓ ${t("common.clear")}` : t("tasks.priority.none")}
           </span>
         </DropdownMenuItem>
         {allTags.length > 0 && <DropdownMenuSeparator />}
         {allTags.length === 0 ? (
           <div className="px-2 py-1.5 text-xs text-muted-foreground">
-            No tags yet — create one from a meeting first.
+            {t("tree.noTagsYet")}
           </div>
         ) : (
           allTags.map((tag) => (

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { RecordingStateSnapshot } from "@/lib/scribe-global";
 import { formatDuration } from "@/lib/store";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -14,6 +15,7 @@ import { Button } from "@/components/ui/button";
  * a stop request through the main process.
  */
 export function MiniRecorder() {
+  const t = useT();
   const [state, setState] = useState<RecordingStateSnapshot>({ kind: "idle" });
   const [now, setNow] = useState<number>(Date.now());
 
@@ -49,25 +51,46 @@ export function MiniRecorder() {
 
   const isStopping = state.kind === "stopping";
   const isStarting = state.kind === "starting";
-  const label =
-    isStopping ? "Stopping…" : isStarting ? "Starting…" : formatDuration(elapsed);
+  const label = isStopping
+    ? t("recording.stoppingEllipsis")
+    : isStarting
+      ? t("recording.startingEllipsis")
+      : formatDuration(elapsed);
 
   return (
     <div
       className="flex h-screen w-screen items-center justify-between gap-3 rounded-2xl border border-border bg-background/95 px-3 py-2 shadow-xl backdrop-blur [-webkit-app-region:drag]"
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div
+        className="flex min-w-0 items-center gap-2"
+        role="status"
+        aria-live="polite"
+      >
         <span
+          aria-hidden
           className={cn(
             "size-2 rounded-full bg-red-500",
             state.kind === "recording" && "animate-pulse",
           )}
         />
-        <span className="font-mono text-xs tabular-nums text-foreground">
+        <span className="sr-only">
+          {isStopping
+            ? t("recording.stoppingEllipsis")
+            : isStarting
+              ? t("recording.startingEllipsis")
+              : t("status.recording")}
+        </span>
+        <span
+          aria-hidden
+          className="font-mono text-xs tabular-nums text-foreground"
+        >
           {label}
         </span>
         {state.title && (
-          <span className="ml-1 truncate text-xs text-muted-foreground">
+          <span
+            aria-hidden
+            className="ml-1 truncate text-xs text-muted-foreground"
+          >
             {state.title}
           </span>
         )}
@@ -78,9 +101,10 @@ export function MiniRecorder() {
         size="xs"
         onClick={() => window.scribe.floating.requestStop()}
         disabled={state.kind !== "recording"}
+        aria-label={t("recording.stop")}
         className="shrink-0 rounded-full [-webkit-app-region:no-drag]"
       >
-        Stop
+        {t("recording.stop")}
       </Button>
     </div>
   );

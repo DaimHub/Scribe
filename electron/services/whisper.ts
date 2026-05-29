@@ -2,13 +2,17 @@ import { app, BrowserWindow } from "electron";
 import path from "node:path";
 import { mkdir } from "node:fs/promises";
 import {
+  clearTranscriptSpeakers,
+  deleteSpeakersForMeeting,
   deleteTranscriptForMeeting,
   getMeeting,
   insertTranscriptSegment,
+  listTranscript,
   setSpeakerEmbedding,
   setSpeakerMatch,
   setStatus,
   updatePipeline,
+  updateTranscriptSpeaker,
   upsertSpeaker,
 } from "./db.js";
 import type { Pipeline } from "./db.js";
@@ -16,15 +20,17 @@ import { extractClip, mixToMono16k } from "./audio-mix.js";
 import { speakerHintForMeeting } from "./calendar.js";
 import {
   isInstalled as sidecarInstalled,
+  runDiarizeOnly,
   runWhisperX,
   type RunResult,
   type SpeakerEmbedding,
 } from "./python-sidecar.js";
-import { getHfToken } from "./settings.js";
+import { broadcastVoiceLibraryChanged } from "./broadcast.js";
+import { getAiLanguage, getHfToken } from "./settings.js";
 import {
-  AUTO_THRESHOLD,
   findBestMatch,
   mergeIntoLibrary,
+  type MatchVerdict,
 } from "./voice-match.js";
 
 export type WhisperModel =
@@ -64,6 +70,9 @@ export class WhisperXNotInstalledError extends Error {
 export async function transcribeMeeting(opts: {
   meetingId: string;
   model?: WhisperModel;
+  /** Exact speaker count — when set, forces pyannote to this many clusters
+   *  and ignores the calendar-derived min/max hint. */
+  numSpeakers?: number;
 }): Promise<{
   ok: boolean;
   segments: number;
@@ -89,7 +98,7 @@ export async function transcribeMeeting(opts: {
   const mixedPath = path.join(workDir, "mixed-16k.wav");
 
   setStatus(opts.meetingId, "transcribing");
-  emitProgress(opts.meetingId, { stage: "mixing", pct: 4, note: "ffmpeg" });
+  emitProgress(opts.meetingId, { stage: "mixing", pct: 50, note: "ffmpeg" });
   await mixToMono16k({
     micWavPath: meeting.mic_wav_path,
     sysWavPath: meeting.sys_wav_path,
@@ -98,6 +107,7 @@ export async function transcribeMeeting(opts: {
   });
 
   const hfToken = await getHfToken();
+  const aiLanguage = await getAiLanguage();
   // Cap pyannote's clustering with the linked event's invitee count when
   // available. Tighter bounds noticeably improve diarization on short
   // meetings where pyannote tends to over-split. Falls back to 0/0 (no
@@ -108,9 +118,13 @@ export async function transcribeMeeting(opts: {
     {
       wav: mixedPath,
       model: opts.model ?? "large-v3-turbo",
-      language: "auto",
+      language: aiLanguage,
       diarize: !!hfToken,
       hfToken: hfToken ?? undefined,
+      numSpeakers:
+        opts.numSpeakers && opts.numSpeakers > 0
+          ? opts.numSpeakers
+          : undefined,
       minSpeakers,
       maxSpeakers,
       extractEmbeddings: !!hfToken,
@@ -140,7 +154,14 @@ export async function transcribeMeeting(opts: {
     },
   );
 
+  // Wipe both transcript AND per-meeting speakers so re-running the full
+  // pipeline doesn't pile new pyannote IDs on top of stale ones from a
+  // previous pass (the "I asked for 9 but the chip shows 14" symptom —
+  // 9 fresh + 5 leftover from the prior run with bigger cluster count).
+  // The voice_library entries themselves stay — only this meeting's view
+  // into them resets.
   deleteTranscriptForMeeting(opts.meetingId);
+  deleteSpeakersForMeeting(opts.meetingId);
   const speakerLabels = new Map<string, string>();
   let count = 0;
   for (let i = 0; i < result.segments.length; i++) {
@@ -225,6 +246,10 @@ export async function transcribeMeeting(opts: {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("voice:postProcess", postProcess);
     }
+    // Library stats (n_meetings, last_heard_ms) shift whenever speakers get
+    // matched against existing entries, even when no new entry is created.
+    // Ping any open People view to refresh.
+    broadcastVoiceLibraryChanged();
   }
   return {
     ok: true,
@@ -232,6 +257,176 @@ export async function transcribeMeeting(opts: {
     speakers: speakerLabels.size,
     mixedPath,
   };
+}
+
+/**
+ * Re-run pyannote diarization against an existing transcript without
+ * re-transcribing. Useful when the original run skipped diarization (no HF
+ * token configured, network failure, etc.) — the user keeps the transcript
+ * and only pays the diarization cost, which is a fraction of the full
+ * pipeline.
+ */
+export async function rediarizeMeeting(opts: {
+  meetingId: string;
+  /** Exact speaker count — when set, forces pyannote to this many clusters. */
+  numSpeakers?: number;
+}): Promise<{ ok: true; speakers: number; segmentsTagged: number }> {
+  const meeting = getMeeting(opts.meetingId);
+  if (!meeting) throw new Error(`Meeting ${opts.meetingId} not found`);
+  if (!meeting.mic_wav_path && !meeting.sys_wav_path) {
+    throw new Error("Meeting has no audio");
+  }
+  if (!(await sidecarInstalled())) throw new WhisperXNotInstalledError();
+  const hfToken = await getHfToken();
+  if (!hfToken) {
+    throw new Error(
+      "Hugging Face token required for diarization — set it in Settings.",
+    );
+  }
+  const transcript = listTranscript(opts.meetingId);
+  if (transcript.length === 0) {
+    throw new Error(
+      "No transcript to diarize against — process the meeting first.",
+    );
+  }
+
+  const workDir = path.join(
+    app.getPath("userData"),
+    "meetings",
+    opts.meetingId,
+  );
+  await mkdir(workDir, { recursive: true });
+  const mixedPath = path.join(workDir, "mixed-16k.wav");
+
+  setStatus(opts.meetingId, "transcribing");
+  emitProgress(opts.meetingId, { stage: "mixing", pct: 50, note: "ffmpeg" });
+  await mixToMono16k({
+    micWavPath: meeting.mic_wav_path,
+    sysWavPath: meeting.sys_wav_path,
+    outputPath: mixedPath,
+    targetSampleRate: 16000,
+  });
+
+  const { minSpeakers, maxSpeakers } = speakerHintForMeeting(opts.meetingId);
+
+  // Capture the diarize-step model name as it streams so we can persist it
+  // in the same pipeline_json shape the full run produces.
+  const pipeline: Pipeline = parseExistingPipeline(meeting.pipeline_json);
+  const result = await runDiarizeOnly(
+    {
+      wav: mixedPath,
+      hfToken,
+      // Exact count wins over the calendar-derived range; only one of them
+      // gets used downstream — the python side ignores min/max when
+      // num_speakers > 0.
+      numSpeakers:
+        opts.numSpeakers && opts.numSpeakers > 0
+          ? opts.numSpeakers
+          : undefined,
+      minSpeakers,
+      maxSpeakers,
+      segments: transcript.map((t) => ({
+        idx: t.segment_idx,
+        start_ms: t.start_ms,
+        end_ms: t.end_ms,
+      })),
+    },
+    (e) => {
+      if (e.model && (e.stage.startsWith("loading-diarize") || e.stage.startsWith("diariz"))) {
+        pipeline.diarize = e.model;
+      }
+      emitProgress(opts.meetingId, e);
+    },
+  );
+
+  // Wipe any stale per-meeting speakers + transcript speaker tags so we apply
+  // the fresh diarization on a clean slate. Voice-library entries themselves
+  // are untouched — those live in a separate table.
+  deleteSpeakersForMeeting(opts.meetingId);
+  clearTranscriptSpeakers(opts.meetingId);
+
+  // Apply assignments. Build a default-name map keyed by the order each
+  // speaker first appears, so the labels match what the full pipeline would
+  // have produced (Speaker 1, Speaker 2, …).
+  const speakerLabels = new Map<string, string>();
+  for (const a of result.assignments) {
+    if (!speakerLabels.has(a.speaker)) {
+      speakerLabels.set(a.speaker, prettySpeakerName(a.speaker, speakerLabels.size));
+      upsertSpeaker(opts.meetingId, a.speaker, speakerLabels.get(a.speaker)!);
+    }
+    updateTranscriptSpeaker(opts.meetingId, a.segment_idx, a.speaker);
+  }
+
+  // Synthesize the RunResult["segments"] shape so we can reuse the existing
+  // post-process helper — it only reads start_ms/end_ms/speaker.
+  const fakeSegments: RunResult["segments"] = transcript.map((t) => ({
+    text: t.text,
+    start_ms: t.start_ms,
+    end_ms: t.end_ms,
+    speaker:
+      result.assignments.find((a) => a.segment_idx === t.segment_idx)?.speaker ??
+      null,
+    words: [],
+  }));
+
+  let postProcess: VoicePostProcessSummary = {
+    meetingId: opts.meetingId,
+    autoLinked: [],
+    needsReviewCount: 0,
+    totalSpeakers: speakerLabels.size,
+  };
+  if (result.speakers && result.speakers.length > 0) {
+    try {
+      const speakersDir = path.join(workDir, "speakers");
+      await mkdir(speakersDir, { recursive: true });
+      const matchSummary = await matchSpeakersAgainstLibrary({
+        meetingId: opts.meetingId,
+        speakersDir,
+        mixedWavPath: mixedPath,
+        speakers: result.speakers,
+        segments: fakeSegments,
+        defaultLabels: speakerLabels,
+      });
+      postProcess = {
+        meetingId: opts.meetingId,
+        autoLinked: matchSummary.autoLinked,
+        needsReviewCount: matchSummary.needsReviewCount,
+        totalSpeakers: speakerLabels.size,
+      };
+    } catch (err) {
+      console.warn("[whisper] voice-library matching failed (rediarize):", err);
+    }
+  }
+
+  updatePipeline(opts.meetingId, pipeline);
+  setStatus(opts.meetingId, "diarized");
+  emitProgress(opts.meetingId, {
+    stage: "done",
+    pct: 100,
+    note: `${result.assignments.length} segments, ${speakerLabels.size} speaker(s)`,
+  });
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send("voice:postProcess", postProcess);
+  }
+  // Re-diarize also wipes + repopulates the speakers table, which the
+  // People view's last_heard / n_meetings subqueries depend on. Ping the
+  // tab so it doesn't show stale stats.
+  broadcastVoiceLibraryChanged();
+  return {
+    ok: true,
+    speakers: speakerLabels.size,
+    segmentsTagged: result.assignments.length,
+  };
+}
+
+function parseExistingPipeline(json: string | null): Pipeline {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json) as Pipeline;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -262,19 +457,26 @@ async function matchSpeakersAgainstLibrary(opts: {
   autoLinked: VoicePostProcessSummary["autoLinked"];
   needsReviewCount: number;
 }> {
-  const autoLinked: VoicePostProcessSummary["autoLinked"] = [];
-  let needsReviewCount = 0;
+  // Pass 1 — per cluster: extract a sample clip, persist the embedding on the
+  // per-meeting speaker row, and compute a match verdict against the library.
+  interface Pending {
+    speakerId: string;
+    embedding: Float32Array | null;
+    fallbackName: string;
+    verdict: MatchVerdict | null;
+  }
+  const pending: Pending[] = [];
 
   for (const sp of opts.speakers) {
     if (!sp.id) continue;
     const fallbackName =
       opts.defaultLabels.get(sp.id) ?? prettySpeakerName(sp.id, 0);
 
-    // 1) Extract a distinctive sample wav clip so the UI can play a preview
-    //    later. We deliberately ignore the sidecar-supplied window — it picks
-    //    the first segment, which tends to capture greetings and crosstalk.
-    //    Instead, pick the speaker's longest solo segment so the user has the
-    //    clearest possible voice fingerprint to identify.
+    // Extract a distinctive sample wav clip so the UI can play a preview
+    // later. We deliberately ignore the sidecar-supplied window — it picks
+    // the first segment, which tends to capture greetings and crosstalk.
+    // Instead, pick the speaker's longest solo segment so the user has the
+    // clearest possible voice fingerprint to identify.
     const window =
       pickDistinctSampleWindow(opts.segments, sp.id) ??
       // Fallback to the sidecar window when transcription couldn't isolate a
@@ -299,7 +501,6 @@ async function matchSpeakersAgainstLibrary(opts: {
       }
     }
 
-    // 2) Persist embedding + clip path on the per-meeting speaker row.
     const embedding = sp.embedding ? new Float32Array(sp.embedding) : null;
     setSpeakerEmbedding({
       meetingId: opts.meetingId,
@@ -308,50 +509,74 @@ async function matchSpeakersAgainstLibrary(opts: {
       sampleClipPath,
     });
 
-    if (!embedding) continue;
+    pending.push({
+      speakerId: sp.id,
+      embedding,
+      fallbackName,
+      verdict: embedding ? findBestMatch(embedding) : null,
+    });
+  }
 
-    // 3) Cross-meeting match against the voice library.
-    const verdict = findBestMatch(embedding);
-    if (verdict.decision === "auto-assign" && verdict.best) {
-      setSpeakerMatch({
-        meetingId: opts.meetingId,
-        speakerId: sp.id,
-        voiceLibraryId: verdict.best.entry.id,
-        matchConfidence: verdict.best.similarity,
-        needsReview: false,
-        displayName: verdict.best.entry.display_name,
-      });
-      mergeIntoLibrary({
-        libraryId: verdict.best.entry.id,
-        newEmbedding: embedding,
-      });
-      autoLinked.push({
-        speakerId: sp.id,
-        displayName: verdict.best.entry.display_name,
-        confidence: verdict.best.similarity,
-      });
-    } else if (verdict.decision === "needs-review" && verdict.best) {
-      // Keep generic "Speaker N" label until the user confirms or rejects.
-      setSpeakerMatch({
-        meetingId: opts.meetingId,
-        speakerId: sp.id,
-        voiceLibraryId: null,
-        matchConfidence: verdict.best.similarity,
-        needsReview: true,
-        displayName: fallbackName,
-      });
-      needsReviewCount++;
-    } else {
-      setSpeakerMatch({
-        meetingId: opts.meetingId,
-        speakerId: sp.id,
-        voiceLibraryId: null,
-        matchConfidence: null,
-        needsReview: true,
-        displayName: fallbackName,
-      });
-      needsReviewCount++;
+  // Pass 2 — resolve auto-assignments GLOBALLY so one library person can't be
+  // tagged onto two clusters in the same meeting. Collect the auto-strength
+  // edges (each cluster's best candidate that cleared the auto bar), sort by
+  // similarity desc, then greedily assign best-first with both-sided
+  // uniqueness (each cluster and each person claimed at most once). A cluster
+  // whose best person is taken by a stronger match falls through to review.
+  const edges = pending
+    .filter((p) => p.verdict?.decision === "auto-assign" && p.verdict.best)
+    .map((p) => ({
+      speakerId: p.speakerId,
+      personId: p.verdict!.best!.entry.id,
+      name: p.verdict!.best!.entry.display_name,
+      sim: p.verdict!.best!.similarity,
+      embedding: p.embedding,
+    }))
+    .sort((a, b) => b.sim - a.sim);
+
+  const autoLinked: VoicePostProcessSummary["autoLinked"] = [];
+  const assignedSpeakers = new Set<string>();
+  const usedPersons = new Set<string>();
+  for (const e of edges) {
+    if (assignedSpeakers.has(e.speakerId) || usedPersons.has(e.personId)) {
+      continue;
     }
+    setSpeakerMatch({
+      meetingId: opts.meetingId,
+      speakerId: e.speakerId,
+      voiceLibraryId: e.personId,
+      matchConfidence: e.sim,
+      needsReview: false,
+      displayName: e.name,
+    });
+    if (e.embedding) {
+      mergeIntoLibrary({ libraryId: e.personId, newEmbedding: e.embedding });
+    }
+    assignedSpeakers.add(e.speakerId);
+    usedPersons.add(e.personId);
+    autoLinked.push({
+      speakerId: e.speakerId,
+      displayName: e.name,
+      confidence: e.sim,
+    });
+  }
+
+  // Pass 3 — anything that produced an embedding but didn't auto-assign is
+  // flagged for review, keeping its generic label + the best candidate's score
+  // so the panel can still surface "did you mean X?". Clusters with no
+  // embedding are left untouched (same as before — no review noise for them).
+  let needsReviewCount = 0;
+  for (const p of pending) {
+    if (assignedSpeakers.has(p.speakerId) || !p.embedding) continue;
+    setSpeakerMatch({
+      meetingId: opts.meetingId,
+      speakerId: p.speakerId,
+      voiceLibraryId: null,
+      matchConfidence: p.verdict?.best?.similarity ?? null,
+      needsReview: true,
+      displayName: p.fallbackName,
+    });
+    needsReviewCount++;
   }
 
   return { autoLinked, needsReviewCount };
@@ -402,9 +627,6 @@ function pickDistinctSampleWindow(
 function safeFilename(s: string): string {
   return s.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
-
-// Suppress "unused" warning when AUTO_THRESHOLD is re-exported elsewhere.
-void AUTO_THRESHOLD;
 
 function prettySpeakerName(speakerId: string, idx: number): string {
   const m = /SPEAKER_(\d+)/.exec(speakerId);
