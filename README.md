@@ -57,27 +57,22 @@ Scribe captures both sides of a conversation — **your microphone and the audio
 
 ## Screenshots
 
-> _Add yours under `docs/` and uncomment below — the layout is ready to go._
-
-<!--
-| Meetings & transcript | AI summary |
-| --- | --- |
-| ![Transcript view](docs/transcript.png) | ![Summary view](docs/summary.png) |
-
-| People & voice library | Floating recorder |
-| --- | --- |
-| ![People view](docs/people.png) | ![Mini recorder](docs/mini-recorder.png) |
--->
+<table>
+  <tr>
+    <td width="50%" align="center"><b>Summary · key points · action items</b></td>
+    <td width="50%" align="center"><b>Time-stamped transcript with speakers</b></td>
+  </tr>
+  <tr>
+    <td valign="top"><img src="docs/scribe-summary.png" alt="Scribe — meeting summary view" /></td>
+    <td valign="top"><img src="docs/scribe-transcript.png" alt="Scribe — meeting transcript view" /></td>
+  </tr>
+</table>
 
 ## How it works
 
-```
-   ┌──────────────┐     ┌───────────────┐     ┌──────────────────┐     ┌───────────────┐
-   │  🎙️ Record    │ ──▶ │ 📝 Transcribe  │ ──▶ │ 🗣️ Diarize &      │ ──▶ │ 🤖 Summarize   │
-   │ mic + system │     │   (WhisperX)  │     │  match speakers  │     │     (LLM)     │
-   └──────────────┘     └───────────────┘     └──────────────────┘     └───────────────┘
-          │                                            │                       │
-     WAV on disk                                 voice library         notes · bullets · tasks
+```mermaid
+flowchart LR
+    A["🎙️ Record<br/>mic + system audio"] --> B["📝 Transcribe<br/>WhisperX"] --> C["🗣️ Diarize<br/>+ match speakers"] --> D["🤖 Summarize<br/>LLM"]
 ```
 
 1. **Record.** Scribe captures your microphone and your Mac's system audio into separate WAV tracks. When you stop, it auto-links the recording to a calendar event if it finds a match — but it does **not** start processing automatically.
@@ -89,23 +84,13 @@ Scribe captures both sides of a conversation — **your microphone and the audio
 
 Scribe runs as **three cooperating runtimes**. The renderer never imports from `electron/` — it talks to the main process exclusively through the typed `window.scribe.*` bridge.
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  Renderer   Next.js · React · Tailwind            ── UI only ──      │
-│  app/ · components/ · lib/                                           │
-│             │  window.scribe.*   (contextBridge · typed IPC)         │
-└─────────────┼────────────────────────────────────────────────────────┘
-              ▼
-┌────────────────────────────────────────────────────────────────────┐
-│  Main process   Electron · Node                                      │
-│  electron/ — SQLite · recorder · calendar OAuth · LLM providers      │
-│             │  spawns + manages                                      │
-└─────────────┼────────────────────────────────────────────────────────┘
-              ▼
-┌────────────────────────────────────────────────────────────────────┐
-│  Python sidecar   python/whisperx_runner.py                          │
-│  WhisperX (faster-whisper / CTranslate2) + pyannote.audio            │
-└────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    R["🖥️ Renderer · Next.js + React + Tailwind · UI only<br/>app/ · components/ · lib/"]
+    M["⚙️ Main process · Electron + Node<br/>electron/ · SQLite · recorder · calendar OAuth · LLM providers"]
+    P["🐍 Python sidecar<br/>python/whisperx_runner.py · WhisperX + faster-whisper + pyannote.audio"]
+    R -->|"window.scribe.* · contextBridge · typed IPC"| M
+    M -->|"spawns + manages"| P
 ```
 
 - **Main process** (`electron/`) owns SQLite, the audio recorder, the Python sidecar, calendar OAuth, and the LLM providers.
